@@ -20,8 +20,8 @@ dotenv.config();
 
 const app = express();
 
-// Trust proxy for correct IP detection on Render/Vercel
-app.set("trust proxy", 1);
+// ── Trust Proxy (MUST be first before everything) ─────────────────────────────
+app.set("trust proxy", true);
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
 app.use(
