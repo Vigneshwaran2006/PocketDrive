@@ -20,6 +20,9 @@ dotenv.config();
 
 const app = express();
 
+// Trust proxy for correct IP detection on Render/Vercel
+app.set("trust proxy", 1);
+
 // ── CORS ──────────────────────────────────────────────────────────────────────
 app.use(
   cors({
@@ -58,7 +61,7 @@ app.get("/", (req, res) => {
 });
 
 // ── 404 Handler ───────────────────────────────────────────────────────────────
-app.use("*splat", (req, res) => {
+app.use("*splat", (req: express.Request, res: express.Response) => {
   res.status(404).json({
     success: false,
     message: `Route ${req.originalUrl} not found`,
@@ -68,7 +71,7 @@ app.use("*splat", (req, res) => {
 // ── Global Error Handler ──────────────────────────────────────────────────────
 app.use(
   (
-    err: any,
+    err: Error,
     req: express.Request,
     res: express.Response,
     next: express.NextFunction

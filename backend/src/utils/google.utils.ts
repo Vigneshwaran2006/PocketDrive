@@ -1,15 +1,25 @@
-import { OAuth2Client } from "google-auth-library";
 import dotenv from "dotenv";
-
 dotenv.config();
 
-const client = new OAuth2Client(
-  process.env.GOOGLE_CLIENT_ID,
-  process.env.GOOGLE_CLIENT_SECRET,
-  process.env.GOOGLE_CALLBACK_URL
-);
+import { OAuth2Client } from "google-auth-library";
+
+const getClient = () => {
+  console.log("Google OAuth Config:", {
+    clientId: process.env.GOOGLE_CLIENT_ID ? "SET" : "MISSING",
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET ? "SET" : "MISSING",
+    callbackUrl: process.env.GOOGLE_CALLBACK_URL,
+  });
+
+  return new OAuth2Client(
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET,
+    process.env.GOOGLE_CALLBACK_URL
+  );
+};
 
 export const getGoogleAuthUrl = (): string => {
+  const client = getClient();
+
   const url = client.generateAuthUrl({
     access_type: "offline",
     scope: [
@@ -18,6 +28,8 @@ export const getGoogleAuthUrl = (): string => {
     ],
     prompt: "consent",
   });
+
+  console.log("Generated Google Auth URL:", url);
 
   return url;
 };
@@ -30,6 +42,8 @@ export interface GoogleUserInfo {
 }
 
 export const getGoogleUser = async (code: string): Promise<GoogleUserInfo> => {
+  const client = getClient();
+
   const { tokens } = await client.getToken(code);
   client.setCredentials(tokens);
 
