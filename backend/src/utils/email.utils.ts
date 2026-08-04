@@ -5,10 +5,15 @@ import crypto from "crypto";
 dotenv.config();
 
 const transporter = nodemailer.createTransport({
-  service: "gmail",
+  host: "smtp.gmail.com",
+  port: 465,
+  secure: true,
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS,
+  },
+  tls: {
+    rejectUnauthorized: false,
   },
 });
 
@@ -20,12 +25,10 @@ transporter.verify((error) => {
   }
 });
 
-// Generate 6-digit OTP
 export const generateOTP = (): string => {
   return crypto.randomInt(100000, 999999).toString();
 };
 
-// Send OTP email
 export const sendOTPEmail = async (
   email: string,
   full_name: string,
@@ -80,7 +83,6 @@ export const sendOTPEmail = async (
   });
 };
 
-// Send password reset email (keep existing)
 export const sendPasswordResetEmail = async (
   email: string,
   full_name: string,
