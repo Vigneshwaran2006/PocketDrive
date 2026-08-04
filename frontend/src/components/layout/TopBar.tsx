@@ -22,40 +22,41 @@ export function TopBar({ title, subtitle }: TopBarProps) {
   };
 
   return (
-    <header className="h-16 bg-white border-b border-gray-100 flex items-center px-6 gap-4 sticky top-0 z-20">
+    <header className="h-14 lg:h-16 bg-white border-b border-gray-100 flex items-center px-4 lg:px-6 gap-3 lg:gap-4 sticky top-0 z-20">
+      {/* Spacer for mobile menu button */}
+      <div className="w-8 lg:hidden" />
+
       {/* Title */}
       <div className="flex-shrink-0">
-        <h2 className="text-lg font-semibold text-gray-900 leading-none">
+        <h2 className="text-base lg:text-lg font-semibold text-gray-900 leading-none">
           {title}
         </h2>
         {subtitle && (
-          <p className="text-xs text-gray-400 mt-0.5">{subtitle}</p>
+          <p className="text-xs text-gray-400 mt-0.5 hidden sm:block">
+            {subtitle}
+          </p>
         )}
       </div>
 
       {/* Search */}
-      <form
-        onSubmit={handleSearch}
-        className="flex-1 max-w-md ml-4"
-      >
+      <form onSubmit={handleSearch} className="flex-1 max-w-md ml-2 lg:ml-4">
         <div className="relative">
           <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">
             🔍
           </span>
           <input
             type="text"
-            placeholder="Search files and folders..."
+            placeholder="Search..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full pl-9 pr-4 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400 focus:bg-white transition-all"
+            className="w-full pl-9 pr-4 py-1.5 lg:py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400 focus:bg-white transition-all"
           />
         </div>
       </form>
 
       {/* Actions */}
       <div className="ml-auto flex items-center gap-2">
-        {/* View toggle */}
-        <div className="flex items-center bg-gray-100 rounded-lg p-0.5">
+        <div className="hidden sm:flex items-center bg-gray-100 rounded-lg p-0.5">
           <button
             onClick={() => setViewMode("grid")}
             className={`p-1.5 rounded-md transition-colors ${
