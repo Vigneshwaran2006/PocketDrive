@@ -13,8 +13,9 @@ import {
   verifyRefreshToken,
 } from "../utils/jwt.utils";
 import {
-  sendVerificationEmail,
+  sendOTPEmail,
   sendPasswordResetEmail,
+  generateOTP,
 } from "../utils/email.utils";
 import { getGoogleAuthUrl, getGoogleUser } from "../utils/google.utils";
 import { AuthenticatedRequest } from "../middleware/auth.middleware";
@@ -64,16 +65,25 @@ export const register = async (req: Request, res: Response): Promise<void> => {
 
     const { data: existingUser } = await supabase
       .from("users")
-      .select("id")
+      .select("id, is_verified")
       .eq("email", email.toLowerCase())
       .single();
 
     if (existingUser) {
-      res.status(409).json({
-        success: false,
-        message: "Email already registered",
-      });
-      return;
+      if (existingUser.is_verified) {
+        res.status(409).json({
+          success: false,
+          message: "Email already registered",
+        });
+        return;
+      }
+
+      // Unverified user exists — delete old data and re-register
+      await supabase
+        .from("email_verifications")
+        .delete()
+        .eq("user_id", existingUser.id);
+      await supabase.from("users").delete().eq("id", existingUser.id);
     }
 
     const hashedPassword = await hashPassword(password);
@@ -96,21 +106,25 @@ export const register = async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    const rawToken = generateRandomToken();
-    const hashedVerificationToken = hashToken(rawToken);
-    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    // Generate 6-digit OTP
+    const otp = generateOTP();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
     await supabase.from("email_verifications").insert({
       user_id: newUser.id,
-      token: hashedVerificationToken,
+      otp: otp,
       expires_at: expiresAt.toISOString(),
     });
 
-    await sendVerificationEmail(newUser.email, newUser.full_name, rawToken);
+    // Send OTP email
+    await sendOTPEmail(newUser.email, newUser.full_name, otp);
 
     res.status(201).json({
       success: true,
-      message: "Account created successfully. Please verify your email.",
+      message: "Account created. Verification code sent to your email.",
+      data: {
+        email: newUser.email,
+      },
     });
   } catch (error) {
     console.error("Register error:", error);
@@ -128,50 +142,110 @@ export const verifyEmail = async (
   res: Response
 ): Promise<void> => {
   try {
-    const { token } = req.body;
+    const { email, otp } = req.body;
 
-    if (!token) {
+    if (!email || !otp) {
       res.status(400).json({
         success: false,
-        message: "Verification token is required",
+        message: "Email and verification code are required",
       });
       return;
     }
 
-    const hashedToken = hashToken(token);
+    // Find user
+    const { data: user } = await supabase
+      .from("users")
+      .select("id, is_verified")
+      .eq("email", email.toLowerCase())
+      .single();
 
+    if (!user) {
+      res.status(404).json({
+        success: false,
+        message: "Account not found",
+      });
+      return;
+    }
+
+    if (user.is_verified) {
+      res.status(400).json({
+        success: false,
+        message: "Email already verified",
+      });
+      return;
+    }
+
+    // Find verification record
     const { data: verification } = await supabase
       .from("email_verifications")
       .select("*")
-      .eq("token", hashedToken)
+      .eq("user_id", user.id)
       .single();
 
     if (!verification) {
       res.status(400).json({
         success: false,
-        message: "Invalid verification token",
+        message: "No verification code found. Please register again.",
       });
       return;
     }
 
+    // Check attempts (max 5)
+    if (verification.attempts >= 5) {
+      await supabase
+        .from("email_verifications")
+        .delete()
+        .eq("id", verification.id);
+
+      await supabase.from("users").delete().eq("id", user.id);
+
+      res.status(400).json({
+        success: false,
+        message: "Too many failed attempts. Please register again.",
+      });
+      return;
+    }
+
+    // Check expiry
     if (new Date(verification.expires_at) < new Date()) {
       await supabase
         .from("email_verifications")
         .delete()
         .eq("id", verification.id);
 
+      await supabase.from("users").delete().eq("id", user.id);
+
       res.status(400).json({
         success: false,
-        message: "Verification token expired. Please register again.",
+        message: "Verification code expired. Please register again.",
       });
       return;
     }
 
+    // Check OTP match
+    if (verification.otp !== otp.toString().trim()) {
+      // Increment attempts
+      await supabase
+        .from("email_verifications")
+        .update({ attempts: verification.attempts + 1 })
+        .eq("id", verification.id);
+
+      const remaining = 5 - (verification.attempts + 1);
+
+      res.status(400).json({
+        success: false,
+        message: `Invalid code. ${remaining} attempt${remaining !== 1 ? "s" : ""} remaining.`,
+      });
+      return;
+    }
+
+    // OTP matches — verify user
     await supabase
       .from("users")
       .update({ is_verified: true, updated_at: new Date().toISOString() })
-      .eq("id", verification.user_id);
+      .eq("id", user.id);
 
+    // Delete verification record
     await supabase
       .from("email_verifications")
       .delete()
@@ -179,10 +253,80 @@ export const verifyEmail = async (
 
     res.status(200).json({
       success: true,
-      message: "Email verified successfully. You can now log in.",
+      message: "Email verified successfully! You can now sign in.",
     });
   } catch (error) {
     console.error("Verify email error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal server error",
+    });
+  }
+};
+
+// ─── RESEND OTP ──────────────────────────────────────────────────────────────
+
+export const resendOTP = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      res.status(400).json({
+        success: false,
+        message: "Email is required",
+      });
+      return;
+    }
+
+    const { data: user } = await supabase
+      .from("users")
+      .select("id, full_name, is_verified")
+      .eq("email", email.toLowerCase())
+      .single();
+
+    if (!user) {
+      res.status(404).json({
+        success: false,
+        message: "Account not found",
+      });
+      return;
+    }
+
+    if (user.is_verified) {
+      res.status(400).json({
+        success: false,
+        message: "Email already verified",
+      });
+      return;
+    }
+
+    // Delete old OTP
+    await supabase
+      .from("email_verifications")
+      .delete()
+      .eq("user_id", user.id);
+
+    // Generate new OTP
+    const otp = generateOTP();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+    await supabase.from("email_verifications").insert({
+      user_id: user.id,
+      otp: otp,
+      expires_at: expiresAt.toISOString(),
+    });
+
+    await sendOTPEmail(email.toLowerCase(), user.full_name, otp);
+
+    res.status(200).json({
+      success: true,
+      message: "New verification code sent to your email.",
+    });
+  } catch (error) {
+    console.error("Resend OTP error:", error);
     res.status(500).json({
       success: false,
       message: "Internal server error",

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, Suspense } from "react";
+import { useState, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import api from "@/lib/api";
 import { Button } from "@/components/ui/Button";
@@ -9,53 +9,114 @@ import { toast, ToastContainer } from "@/components/ui/Toast";
 function VerifyEmailContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const email = searchParams.get("email") || "";
-  const tokenFromUrl = searchParams.get("token") || "";
+  const emailFromUrl = searchParams.get("email") || "";
 
   const [isVerifying, setIsVerifying] = useState(false);
+  const [isResending, setIsResending] = useState(false);
   const [isVerified, setIsVerified] = useState(false);
-  const [manualToken, setManualToken] = useState("");
+  const [otp, setOtp] = useState(["", "", "", "", "", ""]);
+  const [email] = useState(emailFromUrl);
 
-  // Auto verify if token in URL
-  useEffect(() => {
-    if (tokenFromUrl) {
-      handleVerify(tokenFromUrl);
+  const handleOtpChange = (index: number, value: string) => {
+    if (value.length > 1) {
+      // Handle paste
+      const digits = value.replace(/\D/g, "").slice(0, 6).split("");
+      const newOtp = [...otp];
+      digits.forEach((digit, i) => {
+        if (index + i < 6) {
+          newOtp[index + i] = digit;
+        }
+      });
+      setOtp(newOtp);
+
+      // Focus last filled input or next empty
+      const nextIndex = Math.min(index + digits.length, 5);
+      const nextInput = document.getElementById(`otp-${nextIndex}`);
+      nextInput?.focus();
+      return;
     }
-  }, [tokenFromUrl]);
 
-  const handleVerify = async (token: string) => {
-    if (!token.trim()) {
-      toast.error("Please enter the verification token");
+    if (!/^\d*$/.test(value)) return;
+
+    const newOtp = [...otp];
+    newOtp[index] = value;
+    setOtp(newOtp);
+
+    // Auto focus next
+    if (value && index < 5) {
+      const nextInput = document.getElementById(`otp-${index + 1}`);
+      nextInput?.focus();
+    }
+  };
+
+  const handleKeyDown = (index: number, e: React.KeyboardEvent) => {
+    if (e.key === "Backspace" && !otp[index] && index > 0) {
+      const prevInput = document.getElementById(`otp-${index - 1}`);
+      prevInput?.focus();
+      const newOtp = [...otp];
+      newOtp[index - 1] = "";
+      setOtp(newOtp);
+    }
+  };
+
+  const handleVerify = async () => {
+    const otpString = otp.join("");
+    if (otpString.length !== 6) {
+      toast.error("Please enter the 6-digit code");
       return;
     }
 
     setIsVerifying(true);
     try {
-      await api.post("/auth/verify-email", { token });
+      await api.post("/auth/verify-email", {
+        email,
+        otp: otpString,
+      });
+
       setIsVerified(true);
       toast.success("Email verified successfully!");
       setTimeout(() => router.push("/login"), 2000);
     } catch (error: any) {
       const message =
-        error.response?.data?.message || "Verification failed. Try again.";
+        error.response?.data?.message || "Verification failed";
       toast.error(message);
+      setOtp(["", "", "", "", "", ""]);
+      document.getElementById("otp-0")?.focus();
     } finally {
       setIsVerifying(false);
+    }
+  };
+
+  const handleResend = async () => {
+    setIsResending(true);
+    try {
+      await api.post("/auth/resend-otp", { email });
+      toast.success("New code sent to your email!");
+      setOtp(["", "", "", "", "", ""]);
+      document.getElementById("otp-0")?.focus();
+    } catch (error: any) {
+      toast.error(
+        error.response?.data?.message || "Failed to resend code"
+      );
+    } finally {
+      setIsResending(false);
     }
   };
 
   if (isVerified) {
     return (
       <div className="text-center">
-        <div className="text-6xl mb-4">✅</div>
+        <div className="w-20 h-20 bg-green-50 rounded-full flex items-center justify-center mx-auto mb-4">
+          <span className="text-4xl">✅</span>
+        </div>
         <h2 className="text-2xl font-bold text-gray-900 mb-2">
           Email Verified!
         </h2>
         <p className="text-gray-500 mb-6">
-          Your account is now active. Redirecting to login...
+          Redirecting to sign in...
         </p>
         <Button onClick={() => router.push("/login")} className="w-full">
-          Go to Login
+          Go to Sign In
         </Button>
       </div>
     );
@@ -63,46 +124,79 @@ function VerifyEmailContent() {
 
   return (
     <div className="text-center">
-      <div className="text-6xl mb-4">📧</div>
+      <div className="w-20 h-20 bg-blue-50 rounded-full flex items-center justify-center mx-auto mb-4">
+        <span className="text-4xl">📧</span>
+      </div>
       <h2 className="text-2xl font-bold text-gray-900 mb-2">
-        Verify your email
+        Enter verification code
       </h2>
       {email && (
-        <p className="text-gray-500 mb-2 text-sm">
-          We sent a verification link to{" "}
-          <span className="font-medium text-gray-700">{email}</span>
+        <p className="text-sm text-gray-500 mb-1">
+          We sent a 6-digit code to
         </p>
       )}
-      <p className="text-gray-400 text-sm mb-8">
-        Click the link in the email or paste the token below
-      </p>
+      {email && (
+        <p className="text-sm font-medium text-gray-700 mb-6">{email}</p>
+      )}
 
-      <div className="flex flex-col gap-4">
-        <input
-          type="text"
-          placeholder="Paste verification token here"
-          value={manualToken}
-          onChange={(e) => setManualToken(e.target.value)}
-          className="w-full px-4 py-3 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400"
-        />
-        <Button
-          onClick={() => handleVerify(manualToken)}
-          isLoading={isVerifying}
-          className="w-full"
-          size="lg"
-        >
-          Verify Email
-        </Button>
+      {/* OTP Input */}
+      <div className="flex justify-center gap-2 mb-6">
+        {otp.map((digit, index) => (
+          <input
+            key={index}
+            id={`otp-${index}`}
+            type="text"
+            inputMode="numeric"
+            maxLength={6}
+            value={digit}
+            onChange={(e) => handleOtpChange(index, e.target.value)}
+            onKeyDown={(e) => handleKeyDown(index, e)}
+            onFocus={(e) => e.target.select()}
+            className={`
+              w-12 h-14 text-center text-xl font-bold rounded-xl border-2
+              focus:outline-none transition-all
+              ${
+                digit
+                  ? "border-blue-500 bg-blue-50 text-blue-700"
+                  : "border-gray-200 bg-white text-gray-900"
+              }
+              focus:border-blue-500 focus:ring-2 focus:ring-blue-200
+            `}
+            autoFocus={index === 0}
+          />
+        ))}
       </div>
 
-      <div className="mt-6 p-4 bg-blue-50 rounded-lg text-left">
-        <p className="text-xs text-blue-700 font-medium mb-1">
-          Did not receive the email?
+      <Button
+        onClick={handleVerify}
+        isLoading={isVerifying}
+        className="w-full"
+        size="lg"
+        disabled={otp.join("").length !== 6}
+      >
+        Verify Email
+      </Button>
+
+      {/* Resend */}
+      <div className="mt-6">
+        <p className="text-sm text-gray-400 mb-2">
+          Didn&apos;t receive the code?
         </p>
-        <ul className="text-xs text-blue-600 space-y-1">
+        <button
+          onClick={handleResend}
+          disabled={isResending}
+          className="text-sm text-blue-600 font-medium hover:underline disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {isResending ? "Sending..." : "Resend Code"}
+        </button>
+      </div>
+
+      {/* Info */}
+      <div className="mt-6 p-4 bg-gray-50 rounded-xl text-left">
+        <ul className="text-xs text-gray-500 space-y-1.5">
+          <li>• Code expires in 10 minutes</li>
           <li>• Check your spam folder</li>
-          <li>• Make sure you entered the correct email</li>
-          <li>• The link expires in 24 hours</li>
+          <li>• You have 5 attempts</li>
         </ul>
       </div>
     </div>
@@ -123,7 +217,9 @@ export default function VerifyEmailPage() {
           </div>
 
           <div className="bg-white rounded-2xl shadow-xl border border-gray-100 p-8">
-            <Suspense fallback={<div className="text-center">Loading...</div>}>
+            <Suspense
+              fallback={<div className="text-center">Loading...</div>}
+            >
               <VerifyEmailContent />
             </Suspense>
           </div>
