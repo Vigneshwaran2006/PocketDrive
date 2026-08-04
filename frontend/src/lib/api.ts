@@ -1,8 +1,12 @@
-import axios, { AxiosInstance, InternalAxiosRequestConfig, AxiosResponse } from "axios";
+import axios, {
+  AxiosInstance,
+  InternalAxiosRequestConfig,
+  AxiosResponse,
+} from "axios";
 
-const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api";
+const BASE_URL =
+  process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api";
 
-// In-memory token storage
 let accessToken: string | null = null;
 
 export const setAccessToken = (token: string | null) => {
@@ -11,16 +15,14 @@ export const setAccessToken = (token: string | null) => {
 
 export const getAccessToken = () => accessToken;
 
-// Create axios instance
 const api: AxiosInstance = axios.create({
   baseURL: BASE_URL,
-  withCredentials: true, // for httpOnly cookies
+  withCredentials: true,
   headers: {
     "Content-Type": "application/json",
   },
 });
 
-// Request interceptor - attach access token
 api.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
     if (accessToken) {
@@ -31,7 +33,6 @@ api.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
-// Response interceptor - handle token refresh
 let isRefreshing = false;
 let failedQueue: Array<{
   resolve: (token: string) => void;
@@ -89,7 +90,9 @@ api.interceptors.response.use(
       } catch (refreshError) {
         processQueue(refreshError, null);
         setAccessToken(null);
-        window.location.href = "/login";
+        if (typeof window !== "undefined") {
+          window.location.href = "/login";
+        }
         return Promise.reject(refreshError);
       } finally {
         isRefreshing = false;

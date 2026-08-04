@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { Html5Qrcode } from "html5-qrcode";
+import dynamic from "next/dynamic";
 import api from "@/lib/api";
 import { TopBar } from "@/components/layout/TopBar";
 import { Button } from "@/components/ui/Button";
@@ -22,9 +22,8 @@ export default function QRScannerPage() {
   const [sessionInfo, setSessionInfo] = useState<SessionInfo | null>(null);
   const [isConfirming, setIsConfirming] = useState(false);
   const [scannedSessionId, setScannedSessionId] = useState("");
-  const scannerRef = useRef<Html5Qrcode | null>(null);
+  const scannerRef = useRef<any>(null);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       stopScanner();
@@ -33,66 +32,97 @@ export default function QRScannerPage() {
 
   const stopScanner = () => {
     if (scannerRef.current) {
-      scannerRef.current
-        .stop()
-        .then(() => {
-          scannerRef.current?.clear();
-        })
-        .catch(() => {});
+      try {
+        scannerRef.current
+          .stop()
+          .then(() => {
+            if (scannerRef.current) {
+              scannerRef.current.clear();
+            }
+          })
+          .catch(() => {});
+      } catch {}
       scannerRef.current = null;
     }
   };
 
   const startScanner = async () => {
-    setStatus("scanning");
-
+    // First check if camera is available
     try {
-      const scanner = new Html5Qrcode("qr-reader");
-      scannerRef.current = scanner;
-
-      await scanner.start(
-        { facingMode: "environment" },
-        {
-          fps: 10,
-          qrbox: { width: 250, height: 250 },
-          aspectRatio: 1,
-          disableFlip: false,
-        },
-        onScanSuccess,
-        () => {}
-      );
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment" },
+      });
+      // Stop the test stream
+      stream.getTracks().forEach((track) => track.stop());
     } catch (error: any) {
-      console.error("Camera error:", error);
-
       if (
-        error.toString().includes("NotAllowedError") ||
-        error.toString().includes("Permission")
+        error.name === "NotAllowedError" ||
+        error.name === "PermissionDeniedError"
       ) {
         setStatus("denied");
-      } else {
-        toast.error("Could not access camera");
+        return;
+      }
+      if (error.name === "NotFoundError") {
+        toast.error("No camera found on this device");
+        setStatus("error");
+        return;
+      }
+      toast.error("Could not access camera");
+      setStatus("error");
+      return;
+    }
+
+    setStatus("scanning");
+
+    // Small delay to let DOM render
+    setTimeout(async () => {
+      try {
+        const { Html5Qrcode } = await import("html5-qrcode");
+        const scanner = new Html5Qrcode("qr-reader");
+        scannerRef.current = scanner;
+
+        await scanner.start(
+          { facingMode: "environment" },
+          {
+            fps: 10,
+            qrbox: { width: 250, height: 250 },
+            aspectRatio: 1,
+            disableFlip: false,
+          },
+          onScanSuccess,
+          () => {}
+        );
+      } catch (error: any) {
+        console.error("Scanner start error:", error);
+        toast.error("Failed to start camera");
         setStatus("error");
       }
-    }
+    }, 500);
   };
 
   const onScanSuccess = async (decodedText: string) => {
-    // Stop scanner immediately after successful scan
     stopScanner();
 
     try {
-      const url = new URL(decodedText);
-      const sessionId = url.searchParams.get("session");
+      let sessionId = "";
+
+      // Try parsing as URL
+      try {
+        const url = new URL(decodedText);
+        sessionId = url.searchParams.get("session") || "";
+      } catch {
+        // If not a URL, use as is
+        sessionId = decodedText;
+      }
 
       if (!sessionId) {
-        toast.error("Invalid QR code. Please scan a PocketDrive QR code.");
+        toast.error("Invalid QR code");
         setStatus("error");
         return;
       }
 
       setScannedSessionId(sessionId);
 
-      // Get session info
       const res = await api.get(`/qr/session/${sessionId}`);
       setSessionInfo(res.data.data);
       setStatus("confirming");
@@ -140,7 +170,6 @@ export default function QRScannerPage() {
     if (deviceInfo.includes("Chrome")) return "Chrome Browser";
     if (deviceInfo.includes("Firefox")) return "Firefox Browser";
     if (deviceInfo.includes("Safari")) return "Safari Browser";
-    if (deviceInfo.includes("Edge")) return "Edge Browser";
     return "Desktop Device";
   };
 
@@ -149,7 +178,7 @@ export default function QRScannerPage() {
       <TopBar title="Scan QR" subtitle="Login on another device" />
 
       <div className="p-4 lg:p-6 max-w-md mx-auto">
-        {/* Step 1: Permission Request */}
+        {/* Permission */}
         {status === "permission" && (
           <div className="bg-white rounded-2xl border border-gray-100 p-6">
             <div className="text-center mb-6">
@@ -160,67 +189,63 @@ export default function QRScannerPage() {
                 Camera Access Needed
               </h2>
               <p className="text-sm text-gray-500 mt-2">
-                PocketDrive needs your camera to scan the QR code on the
-                desktop screen
+                PocketDrive needs your camera to scan the QR code
               </p>
             </div>
 
-            {/* Steps */}
             <div className="bg-gray-50 rounded-xl p-4 mb-6">
               <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">
                 What will happen:
               </p>
               <div className="flex flex-col gap-3">
                 <div className="flex items-start gap-3">
-                  <div className="w-6 h-6 bg-blue-100 text-blue-700 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 mt-0.5">
+                  <div className="w-6 h-6 bg-blue-100 text-blue-700 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0">
                     1
                   </div>
                   <div>
                     <p className="text-sm text-gray-700 font-medium">
-                      Allow camera access
+                      Tap the button below
                     </p>
                     <p className="text-xs text-gray-400 mt-0.5">
-                      When prompted, tap &quot;Allow&quot; to let PocketDrive use
-                      your camera
+                      Your browser will ask for camera permission
                     </p>
                   </div>
                 </div>
                 <div className="flex items-start gap-3">
-                  <div className="w-6 h-6 bg-blue-100 text-blue-700 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 mt-0.5">
+                  <div className="w-6 h-6 bg-blue-100 text-blue-700 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0">
                     2
                   </div>
                   <div>
                     <p className="text-sm text-gray-700 font-medium">
-                      Point at QR code
+                      Tap &quot;Allow&quot; when prompted
                     </p>
                     <p className="text-xs text-gray-400 mt-0.5">
-                      Point your phone camera at the QR code shown on desktop
+                      This lets PocketDrive use your camera to scan
                     </p>
                   </div>
                 </div>
                 <div className="flex items-start gap-3">
-                  <div className="w-6 h-6 bg-blue-100 text-blue-700 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 mt-0.5">
+                  <div className="w-6 h-6 bg-blue-100 text-blue-700 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0">
                     3
                   </div>
                   <div>
                     <p className="text-sm text-gray-700 font-medium">
-                      Confirm login
+                      Point at QR code on desktop
                     </p>
                     <p className="text-xs text-gray-400 mt-0.5">
-                      Review device info and tap confirm to login on desktop
+                      Camera will auto-detect the QR code
                     </p>
                   </div>
                 </div>
               </div>
             </div>
 
-            {/* Security note */}
             <div className="bg-green-50 rounded-xl p-3 mb-6">
               <div className="flex items-start gap-2">
                 <span className="text-sm mt-0.5">🔒</span>
                 <p className="text-xs text-green-700">
-                  Your camera is only used for scanning. No photos or videos
-                  are saved. Camera access is only active while scanning.
+                  Camera is only used for scanning. No photos or videos are
+                  saved.
                 </p>
               </div>
             </div>
@@ -238,7 +263,7 @@ export default function QRScannerPage() {
           </div>
         )}
 
-        {/* Camera Denied */}
+        {/* Denied */}
         {status === "denied" && (
           <div className="bg-white rounded-2xl border border-gray-100 p-6 text-center">
             <div className="w-20 h-20 bg-red-50 rounded-full flex items-center justify-center mx-auto mb-4">
@@ -248,25 +273,25 @@ export default function QRScannerPage() {
               Camera Access Denied
             </h2>
             <p className="text-sm text-gray-500 mb-6">
-              You need to allow camera access to scan QR codes
+              Camera permission is required to scan QR codes
             </p>
 
             <div className="bg-yellow-50 rounded-xl p-4 mb-6 text-left">
               <p className="text-xs font-semibold text-yellow-700 mb-2">
                 How to enable camera:
               </p>
-              <div className="flex flex-col gap-2">
+              <div className="flex flex-col gap-3">
                 <div className="text-xs text-yellow-600">
-                  <p className="font-medium">Chrome (Android):</p>
-                  <p>Settings → Site Settings → Camera → Allow</p>
+                  <p className="font-medium mb-1">📱 Android Chrome:</p>
+                  <p>Tap the 🔒 lock icon in address bar → Permissions → Camera → Allow</p>
                 </div>
                 <div className="text-xs text-yellow-600">
-                  <p className="font-medium">Safari (iPhone):</p>
+                  <p className="font-medium mb-1">🍎 iPhone Safari:</p>
                   <p>Settings → Safari → Camera → Allow</p>
                 </div>
                 <div className="text-xs text-yellow-600">
-                  <p className="font-medium">Quick fix:</p>
-                  <p>Tap the lock icon 🔒 in browser address bar → Allow Camera</p>
+                  <p className="font-medium mb-1">💡 Quick Fix:</p>
+                  <p>Refresh this page and tap &quot;Allow&quot; when prompted</p>
                 </div>
               </div>
             </div>
@@ -279,7 +304,12 @@ export default function QRScannerPage() {
               >
                 Go Back
               </Button>
-              <Button onClick={startScanner} className="flex-1">
+              <Button
+                onClick={() => {
+                  setStatus("permission");
+                }}
+                className="flex-1"
+              >
                 Try Again
               </Button>
             </div>
@@ -290,21 +320,17 @@ export default function QRScannerPage() {
         {status === "scanning" && (
           <div className="flex flex-col gap-4">
             <div className="bg-white rounded-2xl border border-gray-100 p-4 overflow-hidden">
-              {/* Camera viewfinder */}
-              <div className="relative">
-                <div
-                  id="qr-reader"
-                  className="rounded-xl overflow-hidden"
-                  style={{ border: "none" }}
-                />
+              <div
+                id="qr-reader"
+                className="rounded-xl overflow-hidden"
+                style={{ width: "100%" }}
+              />
 
-                {/* Scanning indicator */}
-                <div className="flex items-center justify-center gap-2 mt-4 py-2">
-                  <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-                  <span className="text-sm text-gray-600 font-medium">
-                    Point camera at QR code...
-                  </span>
-                </div>
+              <div className="flex items-center justify-center gap-2 mt-4 py-2">
+                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+                <span className="text-sm text-gray-600 font-medium">
+                  Point camera at QR code...
+                </span>
               </div>
             </div>
 
@@ -335,7 +361,6 @@ export default function QRScannerPage() {
               </p>
             </div>
 
-            {/* Device info */}
             <div className="bg-gray-50 rounded-xl p-4 mb-4">
               <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">
                 Requesting Device
@@ -355,24 +380,17 @@ export default function QRScannerPage() {
               </div>
             </div>
 
-            {/* Warning */}
             <div className="bg-yellow-50 border border-yellow-100 rounded-xl p-3 mb-6">
               <div className="flex items-start gap-2">
                 <span className="text-sm mt-0.5">⚠️</span>
                 <p className="text-xs text-yellow-700">
                   Only confirm if you scanned a QR code on this device.
-                  If you did not, tap Deny immediately.
                 </p>
               </div>
             </div>
 
-            {/* Buttons */}
             <div className="flex gap-3">
-              <Button
-                variant="danger"
-                onClick={handleDeny}
-                className="flex-1"
-              >
+              <Button variant="danger" onClick={handleDeny} className="flex-1">
                 ✗ Deny
               </Button>
               <Button
@@ -395,11 +413,8 @@ export default function QRScannerPage() {
             <h2 className="text-xl font-bold text-gray-900 mb-2">
               Login Confirmed!
             </h2>
-            <p className="text-sm text-gray-500 mb-2">
-              The desktop device is now logged in
-            </p>
-            <p className="text-xs text-gray-400 mb-6">
-              You can close this page
+            <p className="text-sm text-gray-500 mb-6">
+              Desktop is now logged in
             </p>
             <Button
               onClick={() => router.push("/dashboard")}
@@ -420,8 +435,7 @@ export default function QRScannerPage() {
               Something Went Wrong
             </h2>
             <p className="text-sm text-gray-500 mb-6">
-              Could not process the QR code. Make sure you are scanning a valid
-              PocketDrive QR code.
+              Make sure you are scanning a valid PocketDrive QR code
             </p>
             <div className="flex gap-3">
               <Button

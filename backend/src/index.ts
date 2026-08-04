@@ -20,7 +20,7 @@ dotenv.config();
 
 const app = express();
 
-// ── Trust Proxy (MUST be first before everything) ─────────────────────────────
+// ── Trust Proxy (MUST be first) ───────────────────────────────────────────────
 app.set("trust proxy", true);
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
@@ -28,6 +28,8 @@ app.use(
   cors({
     origin: process.env.CLIENT_URL || "http://localhost:3000",
     credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
 

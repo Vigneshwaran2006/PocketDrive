@@ -1,6 +1,5 @@
 import rateLimit from "express-rate-limit";
 
-// General API rate limit
 export const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
@@ -13,7 +12,6 @@ export const generalLimiter = rateLimit({
   },
 });
 
-// Auth rate limit
 export const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
@@ -26,7 +24,6 @@ export const authLimiter = rateLimit({
   },
 });
 
-// Upload rate limit
 export const uploadLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 10,
