@@ -63,19 +63,61 @@ export function FilePreview({
     if (mimeType.includes("word") || mimeType.includes("document")) {
       return { icon: "📝", label: "Word Document" };
     }
-    if (mimeType.includes("sheet") || mimeType.includes("excel") || mimeType === "text/csv") {
+    if (
+      mimeType.includes("sheet") ||
+      mimeType.includes("excel") ||
+      mimeType === "text/csv"
+    ) {
       return { icon: "📊", label: "Spreadsheet" };
     }
     if (mimeType.includes("presentation") || mimeType.includes("powerpoint")) {
       return { icon: "🎬", label: "Presentation" };
     }
-    if (mimeType.includes("zip")) {
+    if (
+      mimeType.includes("zip") ||
+      mimeType.includes("rar") ||
+      mimeType.includes("7z") ||
+      mimeType.includes("gzip")
+    ) {
       return { icon: "🗜️", label: "Archive" };
     }
     return null;
   };
 
   const officeInfo = getOfficeInfo();
+
+  const getOpenWithText = (): string => {
+    if (mimeType.includes("word")) return "Microsoft Word";
+    if (
+      mimeType.includes("sheet") ||
+      mimeType.includes("excel") ||
+      mimeType === "text/csv"
+    )
+      return "Excel or Google Sheets";
+    if (mimeType.includes("presentation")) return "PowerPoint or Google Slides";
+    if (
+      mimeType.includes("zip") ||
+      mimeType.includes("rar") ||
+      mimeType.includes("7z") ||
+      mimeType.includes("gzip")
+    )
+      return "WinRAR or 7-Zip";
+    return "the appropriate application";
+  };
+
+  const getShortAppName = (): string => {
+    if (mimeType.includes("word")) return "Word";
+    if (mimeType.includes("sheet") || mimeType.includes("excel")) return "Excel";
+    if (mimeType.includes("presentation")) return "PowerPoint";
+    if (
+      mimeType.includes("zip") ||
+      mimeType.includes("rar") ||
+      mimeType.includes("7z") ||
+      mimeType.includes("gzip")
+    )
+      return "an archive tool";
+    return "the appropriate app";
+  };
 
   return createPortal(
     <div className="fixed inset-0 z-[100] bg-gray-900 flex flex-col">
@@ -172,27 +214,30 @@ export function FilePreview({
             </>
           )}
 
-          <a
-            href={url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="p-2 text-gray-300 hover:text-white hover:bg-gray-800 rounded-lg transition-colors"
-            title="Open in new tab"
-          >
-            <svg
-              className="w-4 h-4"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
+          {/* Open in new tab - only for previewable files */}
+          {!officeInfo && (
+            <a
+              href={url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="p-2 text-gray-300 hover:text-white hover:bg-gray-800 rounded-lg transition-colors"
+              title="Open in new tab"
             >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"
-              />
-            </svg>
-          </a>
+              <svg
+                className="w-4 h-4"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"
+                />
+              </svg>
+            </a>
+          )}
 
           {onDownload && (
             <button
@@ -266,7 +311,7 @@ export function FilePreview({
             title={fileName}
           />
         ) : officeInfo ? (
-          // Office files - show helpful message
+          // Office / Archive files - show helpful message
           <div className="w-full h-full flex items-center justify-center p-4">
             <div className="max-w-md w-full bg-gray-900 border border-gray-700 rounded-2xl p-8 text-center">
               <div className="w-20 h-20 bg-gray-800 rounded-2xl flex items-center justify-center mx-auto mb-4">
@@ -277,15 +322,7 @@ export function FilePreview({
               </h3>
               <p className="text-sm text-gray-400 mb-6 leading-relaxed">
                 Preview is not available for this file type in browser.
-                Download to view in{" "}
-                {mimeType.includes("word")
-                  ? "Microsoft Word"
-                  : mimeType.includes("sheet") || mimeType.includes("excel") || mimeType === "text/csv"
-                  ? "Excel or Google Sheets"
-                  : mimeType.includes("presentation")
-                  ? "PowerPoint or Google Slides"
-                  : "the appropriate application"}
-                .
+                Download to open in {getOpenWithText()}.
               </p>
 
               <div className="flex flex-col gap-2">
@@ -311,31 +348,16 @@ export function FilePreview({
                   </button>
                 )}
 
-                <a
-                  href={url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="w-full px-4 py-2.5 bg-gray-800 hover:bg-gray-700 text-gray-300 font-medium rounded-lg transition-colors flex items-center justify-center gap-2"
+                <button
+                  onClick={onClose}
+                  className="w-full px-4 py-2.5 bg-gray-800 hover:bg-gray-700 text-gray-300 font-medium rounded-lg transition-colors"
                 >
-                  <svg
-                    className="w-4 h-4"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"
-                    />
-                  </svg>
-                  Open in New Tab
-                </a>
+                  Close
+                </button>
               </div>
 
               <p className="text-xs text-gray-500 mt-6">
-                💡 Tip: Some browsers may show Office files in a new tab
+                💡 Open the downloaded file in {getShortAppName()} to view its contents
               </p>
             </div>
           </div>
