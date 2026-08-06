@@ -47,10 +47,15 @@ export const getFileIcon = (mimeType: string): string => {
   if (mimeType.includes("word")) return "📝";
   if (mimeType.includes("sheet") || mimeType.includes("excel")) return "📊";
   if (mimeType.includes("presentation") || mimeType.includes("powerpoint"))
-    return "📊";
+    return "🎬";
   if (mimeType === "text/plain") return "📃";
   if (mimeType === "text/csv") return "📊";
-  if (mimeType.includes("zip")) return "🗜️";
+  if (mimeType === "text/html") return "🌐";
+  if (mimeType === "application/json") return "⚙️";
+  if (mimeType === "text/xml" || mimeType === "application/xml") return "📋";
+  if (mimeType === "text/markdown") return "📖";
+  if (mimeType.includes("zip") || mimeType.includes("rar") || mimeType.includes("7z") || mimeType.includes("gzip"))
+    return "🗜️";
   return "📎";
 };
 
@@ -110,7 +115,14 @@ export const isPreviewable = (mimeType: string): boolean => {
     "image/gif",
     "image/webp",
     "image/svg+xml",
+    "image/bmp",
     "text/plain",
+    "text/html",
+    "text/xml",
+    "application/xml",
+    "application/json",
+    "text/markdown",
+    "text/csv",
   ];
   return previewable.includes(mimeType);
 };
