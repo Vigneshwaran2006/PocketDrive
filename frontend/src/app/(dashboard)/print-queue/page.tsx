@@ -1,6 +1,23 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import {
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import api from "@/lib/api";
 import { TopBar } from "@/components/layout/TopBar";
 import { formatFileSize, getFileIcon } from "@/lib/utils";
@@ -9,15 +26,29 @@ import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { Input } from "@/components/ui/Input";
 import { toast } from "@/components/ui/Toast";
+import { printFiles } from "@/lib/print";
+
 
 export default function PrintQueuePage() {
   const [queue, setQueue] = useState<PrintQueueItem[]>([]);
   const [profiles, setProfiles] = useState<PrintProfile[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [isPrinting, setIsPrinting] = useState(false);
   const [showSaveProfile, setShowSaveProfile] = useState(false);
   const [profileName, setProfileName] = useState("");
   const [activeTab, setActiveTab] = useState<"queue" | "profiles">("queue");
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: 5,
+      },
+    }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    })
+  );
 
   useEffect(() => {
     fetchData();
@@ -61,37 +92,89 @@ export default function PrintQueuePage() {
     }
   };
 
-  const handleMoveUp = async (index: number) => {
-    if (index === 0) return;
-    const newQueue = [...queue];
-    [newQueue[index - 1], newQueue[index]] = [
-      newQueue[index],
-      newQueue[index - 1],
-    ];
-    setQueue(newQueue);
-    await saveOrder(newQueue);
-  };
+  // ── DRAG & DROP HANDLER ────────────────────────────────────────────────────
 
-  const handleMoveDown = async (index: number) => {
-    if (index === queue.length - 1) return;
-    const newQueue = [...queue];
-    [newQueue[index], newQueue[index + 1]] = [
-      newQueue[index + 1],
-      newQueue[index],
-    ];
-    setQueue(newQueue);
-    await saveOrder(newQueue);
-  };
+  const handleDragEnd = async (event: DragEndEvent) => {
+    const { active, over } = event;
 
-  const saveOrder = async (newQueue: PrintQueueItem[]) => {
+    if (!over || active.id === over.id) return;
+
+    const oldIndex = queue.findIndex((item) => item.id === active.id);
+    const newIndex = queue.findIndex((item) => item.id === over.id);
+
+    const newQueue = arrayMove(queue, oldIndex, newIndex);
+    setQueue(newQueue);
+
     try {
       await api.patch("/print-queue/reorder", {
         ordered_ids: newQueue.map((item) => item.id),
       });
     } catch {
-      toast.error("Failed to save order");
+      toast.error("Failed to save new order");
+      fetchData();
     }
   };
+
+  // ── PRINT ALL ──────────────────────────────────────────────────────────────
+
+  const handlePrintAll = async () => {
+    if (queue.length === 0) return;
+
+    setIsPrinting(true);
+
+    try {
+      const res = await api.get("/print-queue/download");
+      const files = res.data.data.files;
+
+      if (files.length === 0) {
+        toast.error("No files in queue");
+        setIsPrinting(false);
+        return;
+      }
+
+      const printable = [
+        "application/pdf",
+        "image/jpeg",
+        "image/jpg",
+        "image/png",
+        "image/gif",
+        "image/webp",
+      ];
+
+      const supportedFiles = files.filter((f: any) =>
+        printable.includes(f.mime_type)
+      );
+      const skipped = files.length - supportedFiles.length;
+
+      if (supportedFiles.length === 0) {
+        toast.error("No printable files. Only PDFs and images are supported.");
+        setIsPrinting(false);
+        return;
+      }
+
+      if (skipped > 0) {
+        toast.warning(`${skipped} file(s) skipped (not printable format)`);
+      }
+
+      toast.info("Preparing files...");
+
+      // Start printing
+      printFiles(supportedFiles).catch((error) => {
+        console.error("Print error:", error);
+      });
+
+      // Reset button state quickly after print dialog opens
+      setTimeout(() => {
+        setIsPrinting(false);
+      }, 5000);
+    } catch (error) {
+      console.error(error);
+      toast.error("Failed to prepare files for printing");
+      setIsPrinting(false);
+    }
+  };
+
+  // ── DOWNLOAD ALL ───────────────────────────────────────────────────────────
 
   const handleDownloadAll = async () => {
     setIsDownloading(true);
@@ -104,7 +187,6 @@ export default function PrintQueuePage() {
         return;
       }
 
-      // Download each file
       for (const file of files) {
         const link = document.createElement("a");
         link.href = file.download_url;
@@ -113,7 +195,6 @@ export default function PrintQueuePage() {
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
-        // Small delay between downloads
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
 
@@ -138,17 +219,13 @@ export default function PrintQueuePage() {
       setProfileName("");
       fetchData();
     } catch (error: any) {
-      toast.error(
-        error.response?.data?.message || "Failed to save profile"
-      );
+      toast.error(error.response?.data?.message || "Failed to save profile");
     }
   };
 
   const handleLoadProfile = async (id: string, name: string) => {
     if (
-      !confirm(
-        `Load profile "${name}"? This will replace your current queue.`
-      )
+      !confirm(`Load profile "${name}"? This will replace your current queue.`)
     )
       return;
 
@@ -183,7 +260,7 @@ export default function PrintQueuePage() {
     <div>
       <TopBar
         title="Print Queue"
-        subtitle="Arrange and download your documents"
+        subtitle="Drag to reorder, then print or download"
       />
 
       <div className="p-6">
@@ -193,11 +270,10 @@ export default function PrintQueuePage() {
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
-              className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors capitalize ${
-                activeTab === tab
-                  ? "bg-white text-gray-900 shadow-sm"
-                  : "text-gray-500 hover:text-gray-700"
-              }`}
+              className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors capitalize ${activeTab === tab
+                ? "bg-white text-gray-900 shadow-sm"
+                : "text-gray-500 hover:text-gray-700"
+                }`}
             >
               {tab === "queue" ? "🖨️ Queue" : "💾 Profiles"}
               <span className="ml-1.5 text-xs text-gray-400">
@@ -210,15 +286,23 @@ export default function PrintQueuePage() {
         {/* Queue Tab */}
         {activeTab === "queue" && (
           <>
-            {/* Actions */}
             {queue.length > 0 && (
               <div className="flex items-center gap-3 mb-4 flex-wrap">
                 <Button
-                  onClick={handleDownloadAll}
-                  isLoading={isDownloading}
+                  onClick={handlePrintAll}
+                  isLoading={isPrinting}
                   size="sm"
                 >
-                  ⬇️ Download All ({queue.length})
+                  🖨️ Print ({queue.length})
+                </Button>
+
+                <Button
+                  onClick={handleDownloadAll}
+                  isLoading={isDownloading}
+                  variant="outline"
+                  size="sm"
+                >
+                  ⬇️ Download All
                 </Button>
 
                 <Button
@@ -229,11 +313,7 @@ export default function PrintQueuePage() {
                   💾 Save as Profile
                 </Button>
 
-                <Button
-                  variant="danger"
-                  size="sm"
-                  onClick={handleClear}
-                >
+                <Button variant="danger" size="sm" onClick={handleClear}>
                   🗑️ Clear Queue
                 </Button>
 
@@ -267,10 +347,9 @@ export default function PrintQueuePage() {
                   </p>
                   <ol className="text-xs text-blue-600 space-y-1 list-decimal list-inside">
                     <li>Go to My Files</li>
-                    <li>Right-click a file</li>
-                    <li>Click &quot;Print Queue&quot;</li>
-                    <li>Arrange order here</li>
-                    <li>Download all at once</li>
+                    <li>Click ⋮ (three dots) on a file</li>
+                    <li>Click &quot;Add to Print Queue&quot;</li>
+                    <li>Come back here to arrange & print</li>
                   </ol>
                 </div>
               </div>
@@ -278,104 +357,31 @@ export default function PrintQueuePage() {
               <div className="bg-white rounded-xl border border-gray-100 overflow-hidden">
                 <div className="px-4 py-3 bg-blue-50 border-b border-blue-100">
                   <p className="text-xs text-blue-700">
-                    💡 Use the arrows to arrange the order before downloading
+                    💡 <strong>Drag</strong> items to reorder. Then click{" "}
+                    <strong>Print</strong> to print all files at once in this
+                    order.
                   </p>
                 </div>
 
-                {queue.map((item, index) => (
-                  <div
-                    key={item.id}
-                    className={`flex items-center gap-3 p-4 hover:bg-gray-50 transition-colors ${
-                      index !== 0 ? "border-t border-gray-50" : ""
-                    }`}
+                <DndContext
+                  sensors={sensors}
+                  collisionDetection={closestCenter}
+                  onDragEnd={handleDragEnd}
+                >
+                  <SortableContext
+                    items={queue.map((item) => item.id)}
+                    strategy={verticalListSortingStrategy}
                   >
-                    {/* Order number */}
-                    <div className="w-7 h-7 bg-blue-100 text-blue-700 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0">
-                      {index + 1}
-                    </div>
-
-                    {/* File icon */}
-                    <div className="w-10 h-10 bg-gray-50 rounded-xl flex items-center justify-center text-xl flex-shrink-0">
-                      {getFileIcon(item.files?.mime_type || "")}
-                    </div>
-
-                    {/* File info */}
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-gray-800 truncate">
-                        {item.files?.name}
-                      </p>
-                      <p className="text-xs text-gray-400">
-                        {formatFileSize(item.files?.size || 0)} •{" "}
-                        {item.files?.mime_type}
-                      </p>
-                    </div>
-
-                    {/* Reorder buttons */}
-                    <div className="flex flex-col gap-0.5">
-                      <button
-                        onClick={() => handleMoveUp(index)}
-                        disabled={index === 0}
-                        className="p-1 text-gray-400 hover:text-gray-600 disabled:opacity-30 disabled:cursor-not-allowed rounded transition-colors"
-                        title="Move up"
-                      >
-                        <svg
-                          className="w-3.5 h-3.5"
-                          fill="none"
-                          stroke="currentColor"
-                          viewBox="0 0 24 24"
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth={2}
-                            d="M5 15l7-7 7 7"
-                          />
-                        </svg>
-                      </button>
-                      <button
-                        onClick={() => handleMoveDown(index)}
-                        disabled={index === queue.length - 1}
-                        className="p-1 text-gray-400 hover:text-gray-600 disabled:opacity-30 disabled:cursor-not-allowed rounded transition-colors"
-                        title="Move down"
-                      >
-                        <svg
-                          className="w-3.5 h-3.5"
-                          fill="none"
-                          stroke="currentColor"
-                          viewBox="0 0 24 24"
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth={2}
-                            d="M19 9l-7 7-7-7"
-                          />
-                        </svg>
-                      </button>
-                    </div>
-
-                    {/* Remove */}
-                    <button
-                      onClick={() => handleRemove(item.id)}
-                      className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
-                      title="Remove"
-                    >
-                      <svg
-                        className="w-4 h-4"
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth={2}
-                          d="M6 18L18 6M6 6l12 12"
-                        />
-                      </svg>
-                    </button>
-                  </div>
-                ))}
+                    {queue.map((item, index) => (
+                      <SortableItem
+                        key={item.id}
+                        item={item}
+                        index={index}
+                        onRemove={() => handleRemove(item.id)}
+                      />
+                    ))}
+                  </SortableContext>
+                </DndContext>
               </div>
             )}
           </>
@@ -462,12 +468,13 @@ export default function PrintQueuePage() {
         <div className="flex flex-col gap-4">
           <Input
             label="Profile Name"
-            placeholder="e.g. College Admission, Job Application"
+            placeholder="e.g. College Admission"
             value={profileName}
             onChange={(e) => setProfileName(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleSaveProfile()}
             autoFocus
-            hint={`${queue.length} file${queue.length !== 1 ? "s" : ""} will be saved`}
+            hint={`${queue.length} file${queue.length !== 1 ? "s" : ""
+              } will be saved`}
           />
           <div className="flex gap-2">
             <Button
@@ -487,6 +494,105 @@ export default function PrintQueuePage() {
           </div>
         </div>
       </Modal>
+    </div>
+  );
+}
+
+// ─── Sortable Item ────────────────────────────────────────────────────────────
+
+function SortableItem({
+  item,
+  index,
+  onRemove,
+}: {
+  item: PrintQueueItem;
+  index: number;
+  onRemove: () => void;
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: item.id });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    zIndex: isDragging ? 1 : 0,
+    opacity: isDragging ? 0.5 : 1,
+  };
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={`flex items-center gap-3 p-4 hover:bg-gray-50 transition-colors ${index !== 0 ? "border-t border-gray-50" : ""
+        } ${isDragging ? "bg-blue-50 shadow-lg" : ""}`}
+    >
+      {/* Drag Handle */}
+      <button
+        {...attributes}
+        {...listeners}
+        className="p-1.5 text-gray-300 hover:text-gray-600 cursor-grab active:cursor-grabbing rounded-md hover:bg-gray-100 transition-colors touch-none"
+        title="Drag to reorder"
+      >
+        <svg
+          className="w-4 h-4"
+          fill="currentColor"
+          viewBox="0 0 24 24"
+        >
+          <circle cx="9" cy="6" r="1.5" />
+          <circle cx="9" cy="12" r="1.5" />
+          <circle cx="9" cy="18" r="1.5" />
+          <circle cx="15" cy="6" r="1.5" />
+          <circle cx="15" cy="12" r="1.5" />
+          <circle cx="15" cy="18" r="1.5" />
+        </svg>
+      </button>
+
+      {/* Order number */}
+      <div className="w-7 h-7 bg-blue-100 text-blue-700 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0">
+        {index + 1}
+      </div>
+
+      {/* File icon */}
+      <div className="w-10 h-10 bg-gray-50 rounded-xl flex items-center justify-center text-xl flex-shrink-0">
+        {getFileIcon(item.files?.mime_type || "")}
+      </div>
+
+      {/* File info */}
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-medium text-gray-800 truncate">
+          {item.files?.name}
+        </p>
+        <p className="text-xs text-gray-400">
+          {formatFileSize(item.files?.size || 0)} • {item.files?.mime_type}
+        </p>
+      </div>
+
+      {/* Remove */}
+      <button
+        onClick={onRemove}
+        className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+        title="Remove from queue"
+      >
+        <svg
+          className="w-4 h-4"
+          fill="none"
+          stroke="currentColor"
+          viewBox="0 0 24 24"
+        >
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={2}
+            d="M6 18L18 6M6 6l12 12"
+          />
+        </svg>
+      </button>
     </div>
   );
 }

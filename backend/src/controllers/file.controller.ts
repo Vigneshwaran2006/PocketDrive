@@ -914,3 +914,287 @@ export const getFileVersions = async (
     });
   }
 };
+
+// ─── UPLOAD MULTIPLE FILES ────────────────────────────────────────────────────
+
+export const uploadMultipleFiles = async (
+  req: AuthenticatedRequest,
+  res: Response
+): Promise<void> => {
+  try {
+    const userId = req.user!.userId;
+    const { folder_id } = req.body;
+
+    const files = req.files as Express.Multer.File[];
+
+    if (!files || files.length === 0) {
+      res.status(400).json({
+        success: false,
+        message: "No files provided",
+      });
+      return;
+    }
+
+    // Validate folder
+    if (folder_id) {
+      const { data: folder } = await supabase
+        .from("folders")
+        .select("id")
+        .eq("id", folder_id)
+        .eq("user_id", userId)
+        .single();
+
+      if (!folder) {
+        res.status(404).json({
+          success: false,
+          message: "Folder not found",
+        });
+        return;
+      }
+    }
+
+    const results = {
+      successful: [] as any[],
+      failed: [] as any[],
+      duplicates: [] as any[],
+    };
+
+    // Process each file
+    for (const file of files) {
+      try {
+        // Check file size
+        if (file.size > MAX_FILE_SIZE) {
+          results.failed.push({
+            name: file.originalname,
+            reason: "File size exceeds 50MB limit",
+          });
+          continue;
+        }
+
+        // Check for duplicate
+        const { data: duplicate } = await supabase
+          .from("files")
+          .select("id, name, size")
+          .eq("user_id", userId)
+          .eq("folder_id", folder_id || null)
+          .eq("size", file.size)
+          .eq("original_name", file.originalname)
+          .single();
+
+        if (duplicate) {
+          results.duplicates.push({
+            name: file.originalname,
+            existing_id: duplicate.id,
+          });
+          continue;
+        }
+
+        const extension = path.extname(file.originalname).toLowerCase();
+        const uniqueFileName = `${userId}/${Date.now()}-${Math.random()
+          .toString(36)
+          .substring(7)}${extension}`;
+
+        // Upload to storage
+        await uploadToStorage(uniqueFileName, file.buffer, file.mimetype);
+
+        // Check for versioning
+        const { data: existingFile } = await supabase
+          .from("files")
+          .select("*")
+          .eq("user_id", userId)
+          .eq("folder_id", folder_id || null)
+          .eq("original_name", file.originalname)
+          .single();
+
+        if (existingFile) {
+          // Create version
+          await supabase.from("file_versions").insert({
+            file_id: existingFile.id,
+            user_id: userId,
+            version: existingFile.version,
+            storage_path: existingFile.storage_path,
+            size: existingFile.size,
+          });
+
+          const { data: updatedFile } = await supabase
+            .from("files")
+            .update({
+              storage_path: uniqueFileName,
+              size: file.size,
+              version: existingFile.version + 1,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", existingFile.id)
+            .select("*")
+            .single();
+
+          await updateStorageUsed(userId, file.size - existingFile.size);
+
+          await logActivity({
+            user_id: userId,
+            action: "uploaded_new_version",
+            item_type: "file",
+            item_id: String(updatedFile!.id),
+            item_name: String(updatedFile!.name),
+            metadata: { version: updatedFile!.version },
+          });
+
+          results.successful.push({
+            name: file.originalname,
+            file: updatedFile,
+            is_new_version: true,
+          });
+          continue;
+        }
+
+        // Create new file
+        const { data: newFile, error: insertError } = await supabase
+          .from("files")
+          .insert({
+            user_id: userId,
+            folder_id: folder_id || null,
+            name: file.originalname,
+            original_name: file.originalname,
+            storage_path: uniqueFileName,
+            mime_type: file.mimetype,
+            size: file.size,
+            extension: extension || null,
+          })
+          .select("*")
+          .single();
+
+        if (insertError || !newFile) {
+          await deleteFromStorage(uniqueFileName);
+          results.failed.push({
+            name: file.originalname,
+            reason: "Failed to save file record",
+          });
+          continue;
+        }
+
+        await updateStorageUsed(userId, file.size);
+
+        await logActivity({
+          user_id: userId,
+          action: "uploaded_file",
+          item_type: "file",
+          item_id: String(newFile.id),
+          item_name: String(newFile.name),
+          metadata: {
+            size: file.size,
+            mime_type: file.mimetype,
+          },
+        });
+
+        results.successful.push({
+          name: file.originalname,
+          file: newFile,
+        });
+      } catch (error: any) {
+        console.error(`Failed to upload ${file.originalname}:`, error);
+        results.failed.push({
+          name: file.originalname,
+          reason: error.message || "Upload failed",
+        });
+      }
+    }
+
+    const totalUploaded = results.successful.length;
+    const totalFailed = results.failed.length;
+    const totalDuplicates = results.duplicates.length;
+
+    res.status(200).json({
+      success: true,
+      message: `${totalUploaded} file${
+        totalUploaded !== 1 ? "s" : ""
+      } uploaded${totalDuplicates > 0 ? `, ${totalDuplicates} duplicate${totalDuplicates !== 1 ? "s" : ""}` : ""}${
+        totalFailed > 0 ? `, ${totalFailed} failed` : ""
+      }`,
+      data: results,
+    });
+  } catch (error) {
+    console.error("Upload multiple files error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal server error",
+    });
+  }
+};
+
+// ─── BULK DELETE FILES ────────────────────────────────────────────────────────
+
+export const bulkDeleteFiles = async (
+  req: AuthenticatedRequest,
+  res: Response
+): Promise<void> => {
+  try {
+    const userId = req.user!.userId;
+    const { file_ids } = req.body;
+
+    if (!Array.isArray(file_ids) || file_ids.length === 0) {
+      res.status(400).json({
+        success: false,
+        message: "file_ids array is required",
+      });
+      return;
+    }
+
+    const { data: files } = await supabase
+      .from("files")
+      .select("*")
+      .in("id", file_ids)
+      .eq("user_id", userId);
+
+    if (!files || files.length === 0) {
+      res.status(404).json({
+        success: false,
+        message: "No files found",
+      });
+      return;
+    }
+
+    const trashItems = files.map((file) => ({
+      user_id: userId,
+      item_id: file.id,
+      item_type: "file" as const,
+      item_name: file.name,
+      item_data: file,
+    }));
+
+    await supabase.from("trash").insert(trashItems);
+
+    await supabase
+      .from("files")
+      .delete()
+      .in("id", file_ids)
+      .eq("user_id", userId);
+
+    const totalSize = files.reduce(
+      (sum: number, f: any) => sum + f.size,
+      0
+    );
+    await updateStorageUsed(userId, -totalSize);
+
+    await logActivity({
+      user_id: userId,
+      action: "bulk_deleted_files",
+      metadata: {
+        count: files.length,
+        total_size: totalSize,
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `${files.length} file${
+        files.length !== 1 ? "s" : ""
+      } moved to trash`,
+    });
+  } catch (error) {
+    console.error("Bulk delete files error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal server error",
+    });
+  }
+};

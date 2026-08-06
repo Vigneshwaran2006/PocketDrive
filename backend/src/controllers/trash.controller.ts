@@ -240,3 +240,163 @@ export const emptyTrash = async (
     });
   }
 };
+
+// ─── BULK RESTORE ─────────────────────────────────────────────────────────────
+
+export const bulkRestoreTrash = async (
+  req: AuthenticatedRequest,
+  res: Response
+): Promise<void> => {
+  try {
+    const userId = req.user!.userId;
+    const { trash_ids } = req.body;
+
+    if (!Array.isArray(trash_ids) || trash_ids.length === 0) {
+      res.status(400).json({
+        success: false,
+        message: "trash_ids array is required",
+      });
+      return;
+    }
+
+    const { data: trashItems } = await supabase
+      .from("trash")
+      .select("*")
+      .in("id", trash_ids)
+      .eq("user_id", userId);
+
+    if (!trashItems || trashItems.length === 0) {
+      res.status(404).json({
+        success: false,
+        message: "No items found",
+      });
+      return;
+    }
+
+    for (const item of trashItems) {
+      const itemData = item.item_data as any;
+
+      if (item.item_type === "file") {
+        await supabase.from("files").insert({
+          id: itemData.id,
+          user_id: itemData.user_id,
+          folder_id: itemData.folder_id,
+          name: itemData.name,
+          original_name: itemData.original_name,
+          storage_path: itemData.storage_path,
+          mime_type: itemData.mime_type,
+          size: itemData.size,
+          extension: itemData.extension,
+          is_favorited: itemData.is_favorited,
+          is_pinned: itemData.is_pinned,
+          tags: itemData.tags,
+          version: itemData.version,
+          created_at: itemData.created_at,
+          updated_at: new Date().toISOString(),
+        });
+
+        await updateStorageUsed(userId, itemData.size);
+      } else {
+        await supabase.from("folders").insert({
+          id: itemData.id,
+          user_id: itemData.user_id,
+          parent_id: itemData.parent_id,
+          name: itemData.name,
+          color: itemData.color,
+          is_favorited: itemData.is_favorited,
+          is_pinned: itemData.is_pinned,
+          created_at: itemData.created_at,
+          updated_at: new Date().toISOString(),
+        });
+      }
+    }
+
+    await supabase.from("trash").delete().in("id", trash_ids);
+
+    await logActivity({
+      user_id: userId,
+      action: "bulk_restored_from_trash",
+      metadata: { count: trashItems.length },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `${trashItems.length} item${
+        trashItems.length !== 1 ? "s" : ""
+      } restored`,
+    });
+  } catch (error) {
+    console.error("Bulk restore error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal server error",
+    });
+  }
+};
+
+// ─── BULK PERMANENT DELETE ────────────────────────────────────────────────────
+
+export const bulkPermanentDelete = async (
+  req: AuthenticatedRequest,
+  res: Response
+): Promise<void> => {
+  try {
+    const userId = req.user!.userId;
+    const { trash_ids } = req.body;
+
+    if (!Array.isArray(trash_ids) || trash_ids.length === 0) {
+      res.status(400).json({
+        success: false,
+        message: "trash_ids array is required",
+      });
+      return;
+    }
+
+    const { data: trashItems } = await supabase
+      .from("trash")
+      .select("*")
+      .in("id", trash_ids)
+      .eq("user_id", userId);
+
+    if (!trashItems || trashItems.length === 0) {
+      res.status(404).json({
+        success: false,
+        message: "No items found",
+      });
+      return;
+    }
+
+    // Delete files from storage
+    for (const item of trashItems) {
+      if (item.item_type === "file") {
+        const itemData = item.item_data as any;
+        if (itemData.storage_path) {
+          try {
+            await deleteFromStorage(itemData.storage_path);
+          } catch {}
+        }
+      }
+    }
+
+    await supabase.from("trash").delete().in("id", trash_ids);
+
+    await logActivity({
+      user_id: userId,
+      action: "bulk_permanent_delete",
+      metadata: { count: trashItems.length },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `${trashItems.length} item${
+        trashItems.length !== 1 ? "s" : ""
+      } permanently deleted`,
+    });
+  } catch (error) {
+    console.error("Bulk permanent delete error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal server error",
+    });
+  }
+};

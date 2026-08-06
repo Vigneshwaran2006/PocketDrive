@@ -609,3 +609,72 @@ const buildBreadcrumb = async (
 
   return breadcrumb;
 };
+
+// ─── BULK DELETE FOLDERS ──────────────────────────────────────────────────────
+
+export const bulkDeleteFolders = async (
+  req: AuthenticatedRequest,
+  res: Response
+): Promise<void> => {
+  try {
+    const userId = req.user!.userId;
+    const { folder_ids } = req.body;
+
+    if (!Array.isArray(folder_ids) || folder_ids.length === 0) {
+      res.status(400).json({
+        success: false,
+        message: "folder_ids array is required",
+      });
+      return;
+    }
+
+    const { data: folders } = await supabase
+      .from("folders")
+      .select("*")
+      .in("id", folder_ids)
+      .eq("user_id", userId);
+
+    if (!folders || folders.length === 0) {
+      res.status(404).json({
+        success: false,
+        message: "No folders found",
+      });
+      return;
+    }
+
+    const trashItems = folders.map((folder) => ({
+      user_id: userId,
+      item_id: folder.id,
+      item_type: "folder" as const,
+      item_name: folder.name,
+      item_data: folder,
+    }));
+
+    await supabase.from("trash").insert(trashItems);
+
+    await supabase
+      .from("folders")
+      .delete()
+      .in("id", folder_ids)
+      .eq("user_id", userId);
+
+    await logActivity({
+      user_id: userId,
+      action: "bulk_deleted_folders",
+      metadata: { count: folders.length },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `${folders.length} folder${
+        folders.length !== 1 ? "s" : ""
+      } moved to trash`,
+    });
+  } catch (error) {
+    console.error("Bulk delete folders error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal server error",
+    });
+  }
+};

@@ -1,6 +1,8 @@
 import { Router } from "express";
 import {
   uploadFile,
+  uploadMultipleFiles,
+  bulkDeleteFiles,
   getFiles,
   getFileById,
   deleteFile,
@@ -22,10 +24,21 @@ const router = Router();
 
 router.use(authenticate);
 
+// Upload — specific routes first
+router.post(
+  "/upload-multiple",
+  upload.array("files", 50),
+  uploadMultipleFiles
+);
 router.post("/upload", upload.single("file"), uploadFile);
-router.get("/", getFiles);
+router.post("/bulk-delete", bulkDeleteFiles);
+
+// Get routes
 router.get("/favorites", getFavoriteFiles);
 router.get("/recent", getRecentFiles);
+router.get("/", getFiles);
+
+// Individual file routes
 router.get("/:id", getFileById);
 router.delete("/:id", deleteFile);
 router.patch("/:id/rename", renameFile);

@@ -8,7 +8,7 @@ interface ModalProps {
   onClose: () => void;
   title: string;
   children: React.ReactNode;
-  size?: "sm" | "md" | "lg";
+  size?: "sm" | "md" | "lg" | "xl" | "full";
 }
 
 export function Modal({
@@ -45,7 +45,11 @@ export function Modal({
     sm: "max-w-sm",
     md: "max-w-md",
     lg: "max-w-2xl",
+    xl: "max-w-5xl",
+    full: "max-w-[95vw]",
   };
+
+  const isFull = size === "full";
 
   return createPortal(
     <div
@@ -55,19 +59,20 @@ export function Modal({
         if (e.target === overlayRef.current) onClose();
       }}
     >
-      {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
 
-      {/* Modal */}
       <div
-        className={`relative w-full ${sizes[size]} bg-white rounded-xl shadow-2xl z-10`}
+        className={`relative w-full ${sizes[size]} bg-white rounded-xl shadow-2xl z-10 flex flex-col ${
+          isFull ? "h-[95vh]" : "max-h-[90vh]"
+        }`}
       >
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-gray-900">{title}</h2>
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 flex-shrink-0">
+          <h2 className="text-lg font-semibold text-gray-900 truncate">
+            {title}
+          </h2>
           <button
             onClick={onClose}
-            className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+            className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors flex-shrink-0"
           >
             <svg
               className="w-5 h-5"
@@ -85,8 +90,13 @@ export function Modal({
           </button>
         </div>
 
-        {/* Content */}
-        <div className="px-6 py-4">{children}</div>
+        <div
+          className={`${
+            isFull ? "flex-1 overflow-hidden" : "px-6 py-4 overflow-y-auto"
+          }`}
+        >
+          {children}
+        </div>
       </div>
     </div>,
     document.body

@@ -9,6 +9,7 @@ import {
   toggleFavoriteFolder,
   togglePinFolder,
   getFavoriteFolders,
+  bulkDeleteFolders,
 } from "../controllers/folder.controller";
 import { authenticate } from "../middleware/auth.middleware";
 
@@ -19,6 +20,8 @@ router.use(authenticate);
 router.post("/", createFolder);
 router.get("/", getFolders);
 router.get("/favorites", getFavoriteFolders);
+router.post("/bulk-delete", bulkDeleteFolders);
+
 router.get("/:id", getFolderById);
 router.patch("/:id/rename", renameFolder);
 router.delete("/:id", deleteFolder);
