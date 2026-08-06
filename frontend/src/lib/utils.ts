@@ -31,7 +31,6 @@ export const formatDate = (dateString: string): string => {
   });
 };
 
-// Format full date
 export const formatFullDate = (dateString: string): string => {
   return new Date(dateString).toLocaleDateString("en-IN", {
     day: "numeric",
@@ -42,7 +41,6 @@ export const formatFullDate = (dateString: string): string => {
   });
 };
 
-// Get file icon based on mime type
 export const getFileIcon = (mimeType: string): string => {
   if (mimeType === "application/pdf") return "📄";
   if (mimeType.startsWith("image/")) return "🖼️";
@@ -56,7 +54,6 @@ export const getFileIcon = (mimeType: string): string => {
   return "📎";
 };
 
-// Get file color based on mime type
 export const getFileColor = (mimeType: string): string => {
   if (mimeType === "application/pdf") return "text-red-500";
   if (mimeType.startsWith("image/")) return "text-blue-500";
@@ -69,7 +66,6 @@ export const getFileColor = (mimeType: string): string => {
   return "text-gray-600";
 };
 
-// Get action label for activity log
 export const getActionLabel = (action: string): string => {
   const labels: Record<string, string> = {
     uploaded_file: "Uploaded",
@@ -90,21 +86,26 @@ export const getActionLabel = (action: string): string => {
     downloaded_print_queue: "Downloaded print queue",
     emptied_trash: "Emptied trash",
     loaded_print_profile: "Loaded print profile",
+    bulk_deleted_files: "Bulk deleted files",
+    bulk_deleted_folders: "Bulk deleted folders",
+    bulk_restored_from_trash: "Bulk restored",
+    bulk_permanent_delete: "Bulk permanent delete",
+    qr_login_confirmed: "QR login confirmed",
   };
   return labels[action] || action;
 };
 
-// Truncate text
 export const truncate = (text: string, maxLength: number): string => {
   if (text.length <= maxLength) return text;
   return `${text.substring(0, maxLength)}...`;
 };
 
-// Check if file is previewable
+// PDFs, images, text - native preview
 export const isPreviewable = (mimeType: string): boolean => {
   const previewable = [
     "application/pdf",
     "image/jpeg",
+    "image/jpg",
     "image/png",
     "image/gif",
     "image/webp",
@@ -114,7 +115,25 @@ export const isPreviewable = (mimeType: string): boolean => {
   return previewable.includes(mimeType);
 };
 
-// Generate color from string (for folder colors)
+// Office docs — previewable via Google Docs Viewer
+export const isOfficePreviewable = (mimeType: string): boolean => {
+  const office = [
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "text/csv",
+  ];
+  return office.includes(mimeType);
+};
+
+// Any type of preview possible
+export const canPreview = (mimeType: string): boolean => {
+  return isPreviewable(mimeType) || isOfficePreviewable(mimeType);
+};
+
 export const stringToColor = (str: string): string => {
   let hash = 0;
   for (let i = 0; i < str.length; i++) {

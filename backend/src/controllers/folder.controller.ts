@@ -21,6 +21,8 @@ export const createFolder = async (
       return;
     }
 
+    const trimmedName = name.trim();
+
     if (parent_id) {
       const { data: parentFolder } = await supabase
         .from("folders")
@@ -38,15 +40,31 @@ export const createFolder = async (
       }
     }
 
-    const { data: existing } = await supabase
+    // Check duplicate - use plain select (not single/maybeSingle)
+    let existingQuery = supabase
       .from("folders")
-      .select("id")
+      .select("id, name")
       .eq("user_id", userId)
-      .eq("name", name.trim())
-      .eq("parent_id", parent_id || null)
-      .single();
+      .eq("name", trimmedName);
 
-    if (existing) {
+    if (parent_id) {
+      existingQuery = existingQuery.eq("parent_id", parent_id);
+    } else {
+      existingQuery = existingQuery.is("parent_id", null);
+    }
+
+    const { data: existingFolders, error: existingError } = await existingQuery;
+
+    if (existingError) {
+      console.error("Duplicate check error:", existingError);
+      res.status(500).json({
+        success: false,
+        message: "Failed to check duplicates",
+      });
+      return;
+    }
+
+    if (existingFolders && existingFolders.length > 0) {
       res.status(409).json({
         success: false,
         message: "A folder with this name already exists here",
@@ -59,7 +77,7 @@ export const createFolder = async (
       .insert({
         user_id: userId,
         parent_id: parent_id || null,
-        name: name.trim(),
+        name: trimmedName,
         color: color || "#6366f1",
       })
       .select("*")
@@ -200,6 +218,8 @@ export const renameFolder = async (
       return;
     }
 
+    const trimmedName = name.trim();
+
     const { data: folder } = await supabase
       .from("folders")
       .select("*")
@@ -215,16 +235,23 @@ export const renameFolder = async (
       return;
     }
 
-    const { data: existing } = await supabase
+    // Check duplicate
+    let existingQuery = supabase
       .from("folders")
       .select("id")
       .eq("user_id", userId)
-      .eq("name", name.trim())
-      .eq("parent_id", folder.parent_id)
-      .neq("id", id)
-      .single();
+      .eq("name", trimmedName)
+      .neq("id", id);
 
-    if (existing) {
+    if (folder.parent_id) {
+      existingQuery = existingQuery.eq("parent_id", folder.parent_id);
+    } else {
+      existingQuery = existingQuery.is("parent_id", null);
+    }
+
+    const { data: existingFolders } = await existingQuery;
+
+    if (existingFolders && existingFolders.length > 0) {
       res.status(409).json({
         success: false,
         message: "A folder with this name already exists here",
@@ -235,7 +262,7 @@ export const renameFolder = async (
     const { data: updated, error } = await supabase
       .from("folders")
       .update({
-        name: name.trim(),
+        name: trimmedName,
         updated_at: new Date().toISOString(),
       })
       .eq("id", id)
@@ -256,7 +283,7 @@ export const renameFolder = async (
       action: "renamed_folder",
       item_type: "folder",
       item_id: id,
-      item_name: name.trim(),
+      item_name: trimmedName,
       metadata: { old_name: String(folder.name) },
     });
 
@@ -274,7 +301,7 @@ export const renameFolder = async (
   }
 };
 
-// ─── DELETE FOLDER ────────────────────────────────────────────────────────────
+// ─── DELETE FOLDER (Recursive) ────────────────────────────────────────────────
 
 export const deleteFolder = async (
   req: AuthenticatedRequest,
@@ -299,18 +326,64 @@ export const deleteFolder = async (
       return;
     }
 
+    // Get ALL descendant folders (recursively)
+    const allFolderIds = await getAllDescendantFolderIds(id, userId);
+    allFolderIds.push(id); // include the folder itself
+
+    // Get ALL files inside these folders
+    const { data: allFiles } = await supabase
+      .from("files")
+      .select("*")
+      .in("folder_id", allFolderIds)
+      .eq("user_id", userId);
+
+    // Get ALL folders (including descendants)
+    const { data: allFolders } = await supabase
+      .from("folders")
+      .select("*")
+      .in("id", allFolderIds)
+      .eq("user_id", userId);
+
+    // Bundle everything as one trash item with all contents
+    const trashData = {
+      folder: folder,
+      all_folders: allFolders || [],
+      all_files: allFiles || [],
+    };
+
+    // Insert single trash entry containing everything
     await supabase.from("trash").insert({
       user_id: userId,
       item_id: folder.id,
       item_type: "folder",
       item_name: folder.name,
-      item_data: folder,
+      item_data: trashData,
     });
 
+    // Delete all files from files table
+    if (allFiles && allFiles.length > 0) {
+      const fileIds = allFiles.map((f) => f.id);
+      await supabase
+        .from("files")
+        .delete()
+        .in("id", fileIds)
+        .eq("user_id", userId);
+
+      // Update storage used
+      const totalSize = allFiles.reduce(
+        (sum: number, f: any) => sum + f.size,
+        0
+      );
+      await import("../utils/storage.utils").then(({ updateStorageUsed }) =>
+        updateStorageUsed(userId, -totalSize)
+      );
+    }
+
+    // Delete all folders from folders table
     await supabase
       .from("folders")
       .delete()
-      .eq("id", id)
+      .in("id", allFolderIds)
       .eq("user_id", userId);
 
     await logActivity({
@@ -319,11 +392,17 @@ export const deleteFolder = async (
       item_type: "folder",
       item_id: id,
       item_name: String(folder.name),
+      metadata: {
+        subfolder_count: (allFolders?.length || 1) - 1,
+        file_count: allFiles?.length || 0,
+      },
     });
 
     res.status(200).json({
       success: true,
-      message: "Folder moved to trash",
+      message: `Folder moved to trash with ${
+        allFolders?.length || 1
+      } folder(s) and ${allFiles?.length || 0} file(s)`,
     });
   } catch (error) {
     console.error("Delete folder error:", error);
@@ -332,6 +411,30 @@ export const deleteFolder = async (
       message: "Internal server error",
     });
   }
+};
+
+// Helper: Get all descendant folder IDs recursively
+const getAllDescendantFolderIds = async (
+  folderId: string,
+  userId: string
+): Promise<string[]> => {
+  const ids: string[] = [];
+
+  const { data: children } = await supabase
+    .from("folders")
+    .select("id")
+    .eq("parent_id", folderId)
+    .eq("user_id", userId);
+
+  if (!children || children.length === 0) return ids;
+
+  for (const child of children) {
+    ids.push(child.id);
+    const descendants = await getAllDescendantFolderIds(child.id, userId);
+    ids.push(...descendants);
+  }
+
+  return ids;
 };
 
 // ─── MOVE FOLDER ──────────────────────────────────────────────────────────────
@@ -571,6 +674,121 @@ export const getFavoriteFolders = async (
   }
 };
 
+// ─── BULK DELETE FOLDERS (Recursive) ──────────────────────────────────────────
+
+export const bulkDeleteFolders = async (
+  req: AuthenticatedRequest,
+  res: Response
+): Promise<void> => {
+  try {
+    const userId = req.user!.userId;
+    const { folder_ids } = req.body;
+
+    if (!Array.isArray(folder_ids) || folder_ids.length === 0) {
+      res.status(400).json({
+        success: false,
+        message: "folder_ids array is required",
+      });
+      return;
+    }
+
+    let totalDeletedFolders = 0;
+    let totalDeletedFiles = 0;
+
+    for (const folderId of folder_ids) {
+      const { data: folder } = await supabase
+        .from("folders")
+        .select("*")
+        .eq("id", folderId)
+        .eq("user_id", userId)
+        .single();
+
+      if (!folder) continue;
+
+      // Get all descendant folders
+      const allFolderIds = await getAllDescendantFolderIds(folderId, userId);
+      allFolderIds.push(folderId);
+
+      // Get all files
+      const { data: allFiles } = await supabase
+        .from("files")
+        .select("*")
+        .in("folder_id", allFolderIds)
+        .eq("user_id", userId);
+
+      // Get all folders
+      const { data: allFolders } = await supabase
+        .from("folders")
+        .select("*")
+        .in("id", allFolderIds)
+        .eq("user_id", userId);
+
+      const trashData = {
+        folder: folder,
+        all_folders: allFolders || [],
+        all_files: allFiles || [],
+      };
+
+      await supabase.from("trash").insert({
+        user_id: userId,
+        item_id: folder.id,
+        item_type: "folder",
+        item_name: folder.name,
+        item_data: trashData,
+      });
+
+      // Delete files
+      if (allFiles && allFiles.length > 0) {
+        const fileIds = allFiles.map((f) => f.id);
+        await supabase
+          .from("files")
+          .delete()
+          .in("id", fileIds)
+          .eq("user_id", userId);
+
+        const totalSize = allFiles.reduce(
+          (sum: number, f: any) => sum + f.size,
+          0
+        );
+        await import("../utils/storage.utils").then(({ updateStorageUsed }) =>
+          updateStorageUsed(userId, -totalSize)
+        );
+
+        totalDeletedFiles += allFiles.length;
+      }
+
+      // Delete folders
+      await supabase
+        .from("folders")
+        .delete()
+        .in("id", allFolderIds)
+        .eq("user_id", userId);
+
+      totalDeletedFolders += allFolders?.length || 1;
+    }
+
+    await logActivity({
+      user_id: userId,
+      action: "bulk_deleted_folders",
+      metadata: {
+        folder_count: totalDeletedFolders,
+        file_count: totalDeletedFiles,
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `${totalDeletedFolders} folder(s) and ${totalDeletedFiles} file(s) moved to trash`,
+    });
+  } catch (error) {
+    console.error("Bulk delete folders error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal server error",
+    });
+  }
+};
+
 // ─── HELPER: BUILD BREADCRUMB ─────────────────────────────────────────────────
 
 interface BreadcrumbFolder {
@@ -608,73 +826,4 @@ const buildBreadcrumb = async (
   }
 
   return breadcrumb;
-};
-
-// ─── BULK DELETE FOLDERS ──────────────────────────────────────────────────────
-
-export const bulkDeleteFolders = async (
-  req: AuthenticatedRequest,
-  res: Response
-): Promise<void> => {
-  try {
-    const userId = req.user!.userId;
-    const { folder_ids } = req.body;
-
-    if (!Array.isArray(folder_ids) || folder_ids.length === 0) {
-      res.status(400).json({
-        success: false,
-        message: "folder_ids array is required",
-      });
-      return;
-    }
-
-    const { data: folders } = await supabase
-      .from("folders")
-      .select("*")
-      .in("id", folder_ids)
-      .eq("user_id", userId);
-
-    if (!folders || folders.length === 0) {
-      res.status(404).json({
-        success: false,
-        message: "No folders found",
-      });
-      return;
-    }
-
-    const trashItems = folders.map((folder) => ({
-      user_id: userId,
-      item_id: folder.id,
-      item_type: "folder" as const,
-      item_name: folder.name,
-      item_data: folder,
-    }));
-
-    await supabase.from("trash").insert(trashItems);
-
-    await supabase
-      .from("folders")
-      .delete()
-      .in("id", folder_ids)
-      .eq("user_id", userId);
-
-    await logActivity({
-      user_id: userId,
-      action: "bulk_deleted_folders",
-      metadata: { count: folders.length },
-    });
-
-    res.status(200).json({
-      success: true,
-      message: `${folders.length} folder${
-        folders.length !== 1 ? "s" : ""
-      } moved to trash`,
-    });
-  } catch (error) {
-    console.error("Bulk delete folders error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Internal server error",
-    });
-  }
 };

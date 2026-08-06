@@ -50,11 +50,41 @@ const processQueue = (error: any, token: string | null = null) => {
   failedQueue = [];
 };
 
+// Track last rate limit toast to prevent spam
+let lastRateLimitToast = 0;
+
 api.interceptors.response.use(
   (response: AxiosResponse) => response,
   async (error) => {
     const originalRequest = error.config;
 
+    // ── Rate limit handler ────────────────────────────────────────────────
+    if (
+      error.response?.status === 429 ||
+      error.response?.data?.code === "RATE_LIMIT_EXCEEDED"
+    ) {
+      const message =
+        error.response?.data?.message ||
+        "Rate limit hit. Try again after 1 minute.";
+
+      // Show toast (throttle to once every 3 seconds)
+      const now = Date.now();
+      if (now - lastRateLimitToast > 3000) {
+        lastRateLimitToast = now;
+        if (typeof window !== "undefined") {
+          try {
+            const { toast } = await import("@/components/ui/Toast");
+            toast.error(message);
+          } catch {
+            console.error(message);
+          }
+        }
+      }
+
+      return Promise.reject(error);
+    }
+
+    // ── Token refresh handler ─────────────────────────────────────────────
     if (
       error.response?.status === 401 &&
       error.response?.data?.code === "TOKEN_EXPIRED" &&

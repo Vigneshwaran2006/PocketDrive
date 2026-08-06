@@ -53,13 +53,22 @@ function SearchContent() {
   const handleDownload = async (id: string, name: string) => {
     try {
       const res = await api.get(`/files/${id}/download`);
+      const { download_url } = res.data.data;
+
+      const response = await fetch(download_url);
+      if (!response.ok) throw new Error("Fetch failed");
+
+      const blob = await response.blob();
+      const blobUrl = URL.createObjectURL(blob);
+
       const link = document.createElement("a");
-      link.href = res.data.data.download_url;
+      link.href = blobUrl;
       link.download = name;
-      link.target = "_blank";
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
+
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
     } catch {
       toast.error("Download failed");
     }
@@ -204,9 +213,8 @@ function SearchContent() {
                     {folders.map((folder, index) => (
                       <div
                         key={folder.id}
-                        className={`flex items-center gap-3 p-4 hover:bg-gray-50 transition-colors cursor-pointer ${
-                          index !== 0 ? "border-t border-gray-50" : ""
-                        }`}
+                        className={`flex items-center gap-3 p-4 hover:bg-gray-50 transition-colors cursor-pointer ${index !== 0 ? "border-t border-gray-50" : ""
+                          }`}
                         onClick={() =>
                           router.push(`/folder/${folder.id}`)
                         }
@@ -247,9 +255,8 @@ function SearchContent() {
                     {files.map((file, index) => (
                       <div
                         key={file.id}
-                        className={`flex items-center gap-3 p-4 hover:bg-gray-50 transition-colors ${
-                          index !== 0 ? "border-t border-gray-50" : ""
-                        }`}
+                        className={`flex items-center gap-3 p-4 hover:bg-gray-50 transition-colors ${index !== 0 ? "border-t border-gray-50" : ""
+                          }`}
                       >
                         <div className="w-10 h-10 bg-gray-50 rounded-xl flex items-center justify-center text-xl flex-shrink-0">
                           {getFileIcon(file.mime_type)}

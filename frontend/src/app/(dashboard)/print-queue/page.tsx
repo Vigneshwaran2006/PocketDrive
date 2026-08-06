@@ -9,6 +9,8 @@ import {
   useSensor,
   useSensors,
   DragEndEvent,
+  DragOverlay,
+  DragStartEvent,
 } from "@dnd-kit/core";
 import {
   arrayMove,
@@ -26,8 +28,8 @@ import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { Input } from "@/components/ui/Input";
 import { toast } from "@/components/ui/Toast";
+import { confirm } from "@/components/ui/ConfirmDialog";
 import { printFiles } from "@/lib/print";
-
 
 export default function PrintQueuePage() {
   const [queue, setQueue] = useState<PrintQueueItem[]>([]);
@@ -38,11 +40,14 @@ export default function PrintQueuePage() {
   const [showSaveProfile, setShowSaveProfile] = useState(false);
   const [profileName, setProfileName] = useState("");
   const [activeTab, setActiveTab] = useState<"queue" | "profiles">("queue");
+  const [activeId, setActiveId] = useState<string | null>(null);
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
+      // Requires holding for 200ms before drag starts (prevents accidental drags)
       activationConstraint: {
-        distance: 5,
+        delay: 200,
+        tolerance: 8,
       },
     }),
     useSensor(KeyboardSensor, {
@@ -81,7 +86,14 @@ export default function PrintQueuePage() {
   };
 
   const handleClear = async () => {
-    if (!confirm("Clear all items from print queue?")) return;
+    const ok = await confirm({
+      title: "Clear Print Queue?",
+      message: "All files will be removed from the print queue.",
+      variant: "warning",
+      confirmLabel: "Clear Queue",
+    });
+
+    if (!ok) return;
 
     try {
       await api.delete("/print-queue/clear");
@@ -92,9 +104,12 @@ export default function PrintQueuePage() {
     }
   };
 
-  // ── DRAG & DROP HANDLER ────────────────────────────────────────────────────
+  const handleDragStart = (event: DragStartEvent) => {
+    setActiveId(event.active.id as string);
+  };
 
   const handleDragEnd = async (event: DragEndEvent) => {
+    setActiveId(null);
     const { active, over } = event;
 
     if (!over || active.id === over.id) return;
@@ -114,8 +129,6 @@ export default function PrintQueuePage() {
       fetchData();
     }
   };
-
-  // ── PRINT ALL ──────────────────────────────────────────────────────────────
 
   const handlePrintAll = async () => {
     if (queue.length === 0) return;
@@ -158,23 +171,19 @@ export default function PrintQueuePage() {
 
       toast.info("Preparing files...");
 
-      // Start printing
       printFiles(supportedFiles).catch((error) => {
         console.error("Print error:", error);
       });
 
-      // Reset button state quickly after print dialog opens
       setTimeout(() => {
         setIsPrinting(false);
-      }, 5000);
+      }, 2000);
     } catch (error) {
       console.error(error);
       toast.error("Failed to prepare files for printing");
       setIsPrinting(false);
     }
   };
-
-  // ── DOWNLOAD ALL ───────────────────────────────────────────────────────────
 
   const handleDownloadAll = async () => {
     setIsDownloading(true);
@@ -188,14 +197,25 @@ export default function PrintQueuePage() {
       }
 
       for (const file of files) {
-        const link = document.createElement("a");
-        link.href = file.download_url;
-        link.download = file.file_name;
-        link.target = "_blank";
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        await new Promise((resolve) => setTimeout(resolve, 500));
+        try {
+          const response = await fetch(file.download_url);
+          if (!response.ok) continue;
+
+          const blob = await response.blob();
+          const blobUrl = URL.createObjectURL(blob);
+
+          const link = document.createElement("a");
+          link.href = blobUrl;
+          link.download = file.file_name;
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+
+          setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+        } catch (err) {
+          console.error(`Failed to download ${file.file_name}:`, err);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 300));
       }
 
       toast.success(`${files.length} files downloaded`);
@@ -224,10 +244,14 @@ export default function PrintQueuePage() {
   };
 
   const handleLoadProfile = async (id: string, name: string) => {
-    if (
-      !confirm(`Load profile "${name}"? This will replace your current queue.`)
-    )
-      return;
+    const ok = await confirm({
+      title: "Load Profile?",
+      message: `Loading "${name}" will replace all files currently in your print queue.`,
+      variant: "warning",
+      confirmLabel: "Load Profile",
+    });
+
+    if (!ok) return;
 
     try {
       await api.post(`/print-queue/profiles/${id}/load`);
@@ -240,7 +264,14 @@ export default function PrintQueuePage() {
   };
 
   const handleDeleteProfile = async (id: string, name: string) => {
-    if (!confirm(`Delete profile "${name}"?`)) return;
+    const ok = await confirm({
+      title: "Delete Profile?",
+      message: `"${name}" will be permanently deleted.`,
+      variant: "danger",
+      confirmLabel: "Delete",
+    });
+
+    if (!ok) return;
 
     try {
       await api.delete(`/print-queue/profiles/${id}`);
@@ -256,11 +287,15 @@ export default function PrintQueuePage() {
     0
   );
 
+  const activeItem = activeId
+    ? queue.find((item) => item.id === activeId)
+    : null;
+
   return (
     <div>
       <TopBar
         title="Print Queue"
-        subtitle="Drag to reorder, then print or download"
+        subtitle="Hold and drag to reorder, then print or download"
       />
 
       <div className="p-6">
@@ -270,10 +305,11 @@ export default function PrintQueuePage() {
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
-              className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors capitalize ${activeTab === tab
-                ? "bg-white text-gray-900 shadow-sm"
-                : "text-gray-500 hover:text-gray-700"
-                }`}
+              className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors capitalize ${
+                activeTab === tab
+                  ? "bg-white text-gray-900 shadow-sm"
+                  : "text-gray-500 hover:text-gray-700"
+              }`}
             >
               {tab === "queue" ? "🖨️ Queue" : "💾 Profiles"}
               <span className="ml-1.5 text-xs text-gray-400">
@@ -347,7 +383,7 @@ export default function PrintQueuePage() {
                   </p>
                   <ol className="text-xs text-blue-600 space-y-1 list-decimal list-inside">
                     <li>Go to My Files</li>
-                    <li>Click ⋮ (three dots) on a file</li>
+                    <li>Click ⋮ on a file</li>
                     <li>Click &quot;Add to Print Queue&quot;</li>
                     <li>Come back here to arrange & print</li>
                   </ol>
@@ -357,15 +393,15 @@ export default function PrintQueuePage() {
               <div className="bg-white rounded-xl border border-gray-100 overflow-hidden">
                 <div className="px-4 py-3 bg-blue-50 border-b border-blue-100">
                   <p className="text-xs text-blue-700">
-                    💡 <strong>Drag</strong> items to reorder. Then click{" "}
-                    <strong>Print</strong> to print all files at once in this
-                    order.
+                    💡 <strong>Hold and drag</strong> any file to reorder.
+                    Then click <strong>Print</strong> to print all files.
                   </p>
                 </div>
 
                 <DndContext
                   sensors={sensors}
                   collisionDetection={closestCenter}
+                  onDragStart={handleDragStart}
                   onDragEnd={handleDragEnd}
                 >
                   <SortableContext
@@ -378,9 +414,30 @@ export default function PrintQueuePage() {
                         item={item}
                         index={index}
                         onRemove={() => handleRemove(item.id)}
+                        isActive={activeId === item.id}
                       />
                     ))}
                   </SortableContext>
+
+                  <DragOverlay>
+                    {activeItem && (
+                      <div className="bg-white rounded-xl shadow-2xl border-2 border-blue-500 opacity-95">
+                        <div className="flex items-center gap-3 p-4">
+                          <div className="w-10 h-10 bg-gray-50 rounded-xl flex items-center justify-center text-xl flex-shrink-0">
+                            {getFileIcon(activeItem.files?.mime_type || "")}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium text-gray-800 truncate">
+                              {activeItem.files?.name}
+                            </p>
+                            <p className="text-xs text-gray-400">
+                              {formatFileSize(activeItem.files?.size || 0)}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </DragOverlay>
                 </DndContext>
               </div>
             )}
@@ -473,8 +530,9 @@ export default function PrintQueuePage() {
             onChange={(e) => setProfileName(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleSaveProfile()}
             autoFocus
-            hint={`${queue.length} file${queue.length !== 1 ? "s" : ""
-              } will be saved`}
+            hint={`${queue.length} file${
+              queue.length !== 1 ? "s" : ""
+            } will be saved`}
           />
           <div className="flex gap-2">
             <Button
@@ -504,10 +562,12 @@ function SortableItem({
   item,
   index,
   onRemove,
+  isActive,
 }: {
   item: PrintQueueItem;
   index: number;
   onRemove: () => void;
+  isActive: boolean;
 }) {
   const {
     attributes,
@@ -521,23 +581,29 @@ function SortableItem({
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
-    zIndex: isDragging ? 1 : 0,
-    opacity: isDragging ? 0.5 : 1,
+    opacity: isDragging ? 0.3 : 1,
   };
 
   return (
     <div
       ref={setNodeRef}
       style={style}
-      className={`flex items-center gap-3 p-4 hover:bg-gray-50 transition-colors ${index !== 0 ? "border-t border-gray-50" : ""
-        } ${isDragging ? "bg-blue-50 shadow-lg" : ""}`}
+      {...attributes}
+      {...listeners}
+      className={`flex items-center gap-3 p-4 transition-colors touch-none select-none cursor-grab active:cursor-grabbing ${
+        index !== 0 ? "border-t border-gray-50" : ""
+      } ${
+        isDragging
+          ? "bg-blue-50 shadow-lg"
+          : isActive
+          ? "opacity-30"
+          : "hover:bg-gray-50"
+      }`}
     >
-      {/* Drag Handle */}
-      <button
-        {...attributes}
-        {...listeners}
-        className="p-1.5 text-gray-300 hover:text-gray-600 cursor-grab active:cursor-grabbing rounded-md hover:bg-gray-100 transition-colors touch-none"
-        title="Drag to reorder"
+      {/* Grip icon - visual indicator */}
+      <div
+        className="p-1 text-gray-300 group-hover:text-gray-500 flex-shrink-0"
+        title="Hold and drag to reorder"
       >
         <svg
           className="w-4 h-4"
@@ -551,7 +617,7 @@ function SortableItem({
           <circle cx="15" cy="12" r="1.5" />
           <circle cx="15" cy="18" r="1.5" />
         </svg>
-      </button>
+      </div>
 
       {/* Order number */}
       <div className="w-7 h-7 bg-blue-100 text-blue-700 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0">
@@ -573,10 +639,14 @@ function SortableItem({
         </p>
       </div>
 
-      {/* Remove */}
+      {/* Remove — stop propagation to prevent drag when clicking */}
       <button
-        onClick={onRemove}
-        className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          onRemove();
+        }}
+        className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors flex-shrink-0"
         title="Remove from queue"
       >
         <svg

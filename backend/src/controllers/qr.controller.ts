@@ -95,7 +95,6 @@ export const pollQRStatus = async (
       return;
     }
 
-    // Check if expired
     if (new Date(session.expires_at) < new Date()) {
       await supabase
         .from("qr_sessions")
@@ -112,12 +111,31 @@ export const pollQRStatus = async (
       return;
     }
 
-    // If confirmed, return access token and mark as used
+    // If confirmed, set refresh cookie and return access token
     if (session.status === "confirmed" && session.access_token) {
+      // Set refresh token as httpOnly cookie on DESKTOP
+      if (session.refresh_token) {
+        const refreshExpiresAt = new Date(
+          Date.now() + 7 * 24 * 60 * 60 * 1000
+        );
+
+        res.cookie("refresh_token", session.refresh_token, {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === "production",
+          sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+          expires: refreshExpiresAt,
+          path: "/",
+        });
+      }
+
       // Mark as used so it can't be reused
       await supabase
         .from("qr_sessions")
-        .update({ status: "used" })
+        .update({
+          status: "used",
+          access_token: null,
+          refresh_token: null,
+        })
         .eq("session_id", session_id);
 
       res.status(200).json({
@@ -131,7 +149,6 @@ export const pollQRStatus = async (
       return;
     }
 
-    // Still pending
     res.status(200).json({
       success: true,
       data: {
@@ -169,7 +186,6 @@ export const confirmQRLogin = async (
       return;
     }
 
-    // Get session
     const { data: session } = await supabase
       .from("qr_sessions")
       .select("*")
@@ -184,7 +200,6 @@ export const confirmQRLogin = async (
       return;
     }
 
-    // Check if expired
     if (new Date(session.expires_at) < new Date()) {
       res.status(400).json({
         success: false,
@@ -193,7 +208,6 @@ export const confirmQRLogin = async (
       return;
     }
 
-    // Check if already used
     if (session.status !== "pending") {
       res.status(400).json({
         success: false,
@@ -202,7 +216,6 @@ export const confirmQRLogin = async (
       return;
     }
 
-    // Get user info
     const { data: user } = await supabase
       .from("users")
       .select("id, email, full_name, avatar_url")
@@ -217,13 +230,12 @@ export const confirmQRLogin = async (
       return;
     }
 
-    // Generate access token for desktop
     const accessToken = generateAccessToken({
       userId: user.id,
       email: user.email,
     });
 
-    // Generate refresh token for desktop
+    // Generate refresh token that desktop will use
     const rawRefreshToken = generateRefreshToken({ userId: user.id });
     const hashedRefreshToken = hashToken(rawRefreshToken);
 
@@ -231,7 +243,6 @@ export const confirmQRLogin = async (
       Date.now() + 7 * 24 * 60 * 60 * 1000
     );
 
-    // Save refresh token
     await supabase.from("refresh_tokens").insert({
       user_id: user.id,
       token: hashedRefreshToken,
@@ -239,13 +250,15 @@ export const confirmQRLogin = async (
       expires_at: refreshExpiresAt.toISOString(),
     });
 
-    // Update QR session with confirmed status and token
+    // Store BOTH access token AND raw refresh token in session
+    // Desktop will fetch both and set refresh cookie itself
     await supabase
       .from("qr_sessions")
       .update({
         status: "confirmed",
         user_id: userId,
         access_token: accessToken,
+        refresh_token: rawRefreshToken, // NEW - send this to desktop
       })
       .eq("session_id", session_id);
 

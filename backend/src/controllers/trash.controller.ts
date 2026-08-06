@@ -65,10 +65,10 @@ export const restoreFromTrash = async (
       return;
     }
 
-    const itemData = trashItem.item_data;
+    const itemData = trashItem.item_data as any;
 
     if (trashItem.item_type === "file") {
-      // Restore file
+      // Restore single file
       await supabase.from("files").insert({
         id: itemData.id,
         user_id: itemData.user_id,
@@ -87,25 +87,100 @@ export const restoreFromTrash = async (
         updated_at: new Date().toISOString(),
       });
 
-      // Restore storage usage
       await updateStorageUsed(userId, itemData.size);
     } else {
-      // Restore folder
-      await supabase.from("folders").insert({
-        id: itemData.id,
-        user_id: itemData.user_id,
-        parent_id: itemData.parent_id,
-        name: itemData.name,
-        color: itemData.color,
-        is_favorited: itemData.is_favorited,
-        is_pinned: itemData.is_pinned,
-        created_at: itemData.created_at,
-        updated_at: new Date().toISOString(),
-      });
+      // Restore folder with ALL contents (files + subfolders)
+
+      // New format: has all_folders and all_files
+      if (itemData.all_folders && itemData.all_files !== undefined) {
+        // Check if parent folder still exists (may have been deleted)
+        const rootFolder = itemData.folder;
+
+        if (rootFolder.parent_id) {
+          const { data: parentExists } = await supabase
+            .from("folders")
+            .select("id")
+            .eq("id", rootFolder.parent_id)
+            .eq("user_id", userId)
+            .maybeSingle();
+
+          if (!parentExists) {
+            // Parent no longer exists, restore to root
+            rootFolder.parent_id = null;
+            // Also update any folder that had this parent
+            itemData.all_folders = itemData.all_folders.map((f: any) =>
+              f.id === rootFolder.id ? { ...f, parent_id: null } : f
+            );
+          }
+        }
+
+        // Restore all folders (they reference each other by parent_id)
+        if (itemData.all_folders.length > 0) {
+          const foldersToRestore = itemData.all_folders.map((f: any) => ({
+            id: f.id,
+            user_id: f.user_id,
+            parent_id: f.parent_id,
+            name: f.name,
+            color: f.color,
+            is_favorited: f.is_favorited,
+            is_pinned: f.is_pinned,
+            created_at: f.created_at,
+            updated_at: new Date().toISOString(),
+          }));
+
+          await supabase.from("folders").insert(foldersToRestore);
+        }
+
+        // Restore all files
+        if (itemData.all_files.length > 0) {
+          const filesToRestore = itemData.all_files.map((f: any) => ({
+            id: f.id,
+            user_id: f.user_id,
+            folder_id: f.folder_id,
+            name: f.name,
+            original_name: f.original_name,
+            storage_path: f.storage_path,
+            mime_type: f.mime_type,
+            size: f.size,
+            extension: f.extension,
+            is_favorited: f.is_favorited,
+            is_pinned: f.is_pinned,
+            tags: f.tags,
+            version: f.version,
+            created_at: f.created_at,
+            updated_at: new Date().toISOString(),
+          }));
+
+          await supabase.from("files").insert(filesToRestore);
+
+          const totalSize = itemData.all_files.reduce(
+            (sum: number, f: any) => sum + f.size,
+            0
+          );
+          await updateStorageUsed(userId, totalSize);
+        }
+      } else {
+        // Old format: just single folder (backward compatible)
+        await supabase.from("folders").insert({
+          id: itemData.id,
+          user_id: itemData.user_id,
+          parent_id: itemData.parent_id,
+          name: itemData.name,
+          color: itemData.color,
+          is_favorited: itemData.is_favorited,
+          is_pinned: itemData.is_pinned,
+          created_at: itemData.created_at,
+          updated_at: new Date().toISOString(),
+        });
+      }
     }
 
     // Remove from trash
-    await supabase.from("trash").delete().eq("id", id).eq("user_id", userId);
+    await supabase
+      .from("trash")
+      .delete()
+      .eq("id", id)
+      .eq("user_id", userId);
 
     await logActivity({
       user_id: userId,
@@ -117,7 +192,9 @@ export const restoreFromTrash = async (
 
     res.status(200).json({
       success: true,
-      message: `${trashItem.item_type === "file" ? "File" : "Folder"} restored successfully`,
+      message: `${
+        trashItem.item_type === "file" ? "File" : "Folder"
+      } restored successfully`,
     });
   } catch (error) {
     console.error("Restore from trash error:", error);
@@ -153,16 +230,33 @@ export const permanentDelete = async (
       return;
     }
 
-    // If file, delete from storage
+    const itemData = trashItem.item_data as any;
+
     if (trashItem.item_type === "file") {
-      const itemData = trashItem.item_data;
+      // Single file
       if (itemData.storage_path) {
-        await deleteFromStorage(itemData.storage_path);
+        try {
+          await deleteFromStorage(itemData.storage_path);
+        } catch {}
+      }
+    } else {
+      // Folder — delete all files in storage
+      if (itemData.all_files && itemData.all_files.length > 0) {
+        for (const file of itemData.all_files) {
+          if (file.storage_path) {
+            try {
+              await deleteFromStorage(file.storage_path);
+            } catch {}
+          }
+        }
       }
     }
 
-    // Delete from trash
-    await supabase.from("trash").delete().eq("id", id).eq("user_id", userId);
+    await supabase
+      .from("trash")
+      .delete()
+      .eq("id", id)
+      .eq("user_id", userId);
 
     await logActivity({
       user_id: userId,
@@ -194,7 +288,6 @@ export const emptyTrash = async (
   try {
     const userId = req.user!.userId;
 
-    // Get all trash items
     const { data: trashItems } = await supabase
       .from("trash")
       .select("*")
@@ -210,16 +303,28 @@ export const emptyTrash = async (
 
     // Delete files from storage
     for (const item of trashItems) {
-      if (item.item_type === "file" && item.item_data?.storage_path) {
-        try {
-          await deleteFromStorage(item.item_data.storage_path);
-        } catch {
-          // Continue even if storage delete fails
+      const itemData = item.item_data as any;
+
+      if (item.item_type === "file") {
+        if (itemData?.storage_path) {
+          try {
+            await deleteFromStorage(itemData.storage_path);
+          } catch {}
+        }
+      } else {
+        // Folder — delete all files
+        if (itemData?.all_files && itemData.all_files.length > 0) {
+          for (const file of itemData.all_files) {
+            if (file.storage_path) {
+              try {
+                await deleteFromStorage(file.storage_path);
+              } catch {}
+            }
+          }
         }
       }
     }
 
-    // Delete all trash items
     await supabase.from("trash").delete().eq("user_id", userId);
 
     await logActivity({
@@ -297,17 +402,83 @@ export const bulkRestoreTrash = async (
 
         await updateStorageUsed(userId, itemData.size);
       } else {
-        await supabase.from("folders").insert({
-          id: itemData.id,
-          user_id: itemData.user_id,
-          parent_id: itemData.parent_id,
-          name: itemData.name,
-          color: itemData.color,
-          is_favorited: itemData.is_favorited,
-          is_pinned: itemData.is_pinned,
-          created_at: itemData.created_at,
-          updated_at: new Date().toISOString(),
-        });
+        // Folder restore (with contents)
+        if (itemData.all_folders && itemData.all_files !== undefined) {
+          const rootFolder = itemData.folder;
+
+          if (rootFolder.parent_id) {
+            const { data: parentExists } = await supabase
+              .from("folders")
+              .select("id")
+              .eq("id", rootFolder.parent_id)
+              .eq("user_id", userId)
+              .maybeSingle();
+
+            if (!parentExists) {
+              rootFolder.parent_id = null;
+              itemData.all_folders = itemData.all_folders.map((f: any) =>
+                f.id === rootFolder.id ? { ...f, parent_id: null } : f
+              );
+            }
+          }
+
+          if (itemData.all_folders.length > 0) {
+            const foldersToRestore = itemData.all_folders.map((f: any) => ({
+              id: f.id,
+              user_id: f.user_id,
+              parent_id: f.parent_id,
+              name: f.name,
+              color: f.color,
+              is_favorited: f.is_favorited,
+              is_pinned: f.is_pinned,
+              created_at: f.created_at,
+              updated_at: new Date().toISOString(),
+            }));
+
+            await supabase.from("folders").insert(foldersToRestore);
+          }
+
+          if (itemData.all_files.length > 0) {
+            const filesToRestore = itemData.all_files.map((f: any) => ({
+              id: f.id,
+              user_id: f.user_id,
+              folder_id: f.folder_id,
+              name: f.name,
+              original_name: f.original_name,
+              storage_path: f.storage_path,
+              mime_type: f.mime_type,
+              size: f.size,
+              extension: f.extension,
+              is_favorited: f.is_favorited,
+              is_pinned: f.is_pinned,
+              tags: f.tags,
+              version: f.version,
+              created_at: f.created_at,
+              updated_at: new Date().toISOString(),
+            }));
+
+            await supabase.from("files").insert(filesToRestore);
+
+            const totalSize = itemData.all_files.reduce(
+              (sum: number, f: any) => sum + f.size,
+              0
+            );
+            await updateStorageUsed(userId, totalSize);
+          }
+        } else {
+          // Old format
+          await supabase.from("folders").insert({
+            id: itemData.id,
+            user_id: itemData.user_id,
+            parent_id: itemData.parent_id,
+            name: itemData.name,
+            color: itemData.color,
+            is_favorited: itemData.is_favorited,
+            is_pinned: itemData.is_pinned,
+            created_at: itemData.created_at,
+            updated_at: new Date().toISOString(),
+          });
+        }
       }
     }
 
@@ -366,14 +537,25 @@ export const bulkPermanentDelete = async (
       return;
     }
 
-    // Delete files from storage
     for (const item of trashItems) {
+      const itemData = item.item_data as any;
+
       if (item.item_type === "file") {
-        const itemData = item.item_data as any;
         if (itemData.storage_path) {
           try {
             await deleteFromStorage(itemData.storage_path);
           } catch {}
+        }
+      } else {
+        // Folder — delete all files
+        if (itemData.all_files && itemData.all_files.length > 0) {
+          for (const file of itemData.all_files) {
+            if (file.storage_path) {
+              try {
+                await deleteFromStorage(file.storage_path);
+              } catch {}
+            }
+          }
         }
       }
     }

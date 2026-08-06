@@ -60,13 +60,22 @@ export default function FavoritesPage() {
   const handleDownload = async (id: string, name: string) => {
     try {
       const res = await api.get(`/files/${id}/download`);
+      const { download_url } = res.data.data;
+
+      const response = await fetch(download_url);
+      if (!response.ok) throw new Error("Fetch failed");
+
+      const blob = await response.blob();
+      const blobUrl = URL.createObjectURL(blob);
+
       const link = document.createElement("a");
-      link.href = res.data.data.download_url;
+      link.href = blobUrl;
       link.download = name;
-      link.target = "_blank";
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
+
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
     } catch {
       toast.error("Download failed");
     }
@@ -92,19 +101,18 @@ export default function FavoritesPage() {
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
-              className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors capitalize ${
-                activeTab === tab
+              className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors capitalize ${activeTab === tab
                   ? "bg-white text-gray-900 shadow-sm"
                   : "text-gray-500 hover:text-gray-700"
-              }`}
+                }`}
             >
               {tab}
               <span className="ml-1.5 text-xs text-gray-400">
                 {tab === "all"
                   ? files.length + folders.length
                   : tab === "files"
-                  ? files.length
-                  : folders.length}
+                    ? files.length
+                    : folders.length}
               </span>
             </button>
           ))}
@@ -191,9 +199,8 @@ export default function FavoritesPage() {
                   {displayFiles.map((file, index) => (
                     <div
                       key={file.id}
-                      className={`flex items-center gap-3 p-4 hover:bg-gray-50 transition-colors group ${
-                        index !== 0 ? "border-t border-gray-50" : ""
-                      }`}
+                      className={`flex items-center gap-3 p-4 hover:bg-gray-50 transition-colors group ${index !== 0 ? "border-t border-gray-50" : ""
+                        }`}
                     >
                       <div className="w-10 h-10 bg-gray-50 rounded-xl flex items-center justify-center text-xl flex-shrink-0">
                         {getFileIcon(file.mime_type)}

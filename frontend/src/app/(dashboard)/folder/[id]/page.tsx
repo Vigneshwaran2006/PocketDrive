@@ -1,21 +1,24 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
+import axios, { CancelTokenSource } from "axios";
 import api from "@/lib/api";
 import { TopBar } from "@/components/layout/TopBar";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { Input } from "@/components/ui/Input";
 import { toast } from "@/components/ui/Toast";
+import { confirm } from "@/components/ui/ConfirmDialog";
 import { useAppStore } from "@/store/app.store";
 import { FilePreview } from "@/components/ui/FilePreview";
 import { printSingleFile } from "@/lib/print";
+import { withLoading } from "@/components/ui/LoadingOverlay";
 import {
   formatFileSize,
   formatDate,
   getFileIcon,
-  isPreviewable,
+  canPreview,
 } from "@/lib/utils";
 import { File, Folder } from "@/types/file.types";
 
@@ -59,10 +62,20 @@ export default function FolderPage() {
     totalSize: 0,
   });
 
+  // Cancel upload refs
+  const uploadCancelRef = useRef<CancelTokenSource | null>(null);
+  const isCancelledRef = useRef(false);
+
   // Selection
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
   const [selectedFolders, setSelectedFolders] = useState<string[]>([]);
   const [selectionMode, setSelectionMode] = useState(false);
+
+  // Loading states for operations
+  const [isCreatingFolder, setIsCreatingFolder] = useState(false);
+  const [isRenaming, setIsRenaming] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [isMoving, setIsMoving] = useState(false);
 
   // Modals
   const [showCreateFolder, setShowCreateFolder] = useState(false);
@@ -121,8 +134,9 @@ export default function FolderPage() {
   };
 
   const handleCreateFolder = async () => {
-    if (!newFolderName.trim()) return;
+    if (!newFolderName.trim() || isCreatingFolder) return;
 
+    setIsCreatingFolder(true);
     try {
       await api.post("/folders", {
         name: newFolderName,
@@ -136,6 +150,8 @@ export default function FolderPage() {
       fetchContents();
     } catch (error: any) {
       toast.error(error.response?.data?.message || "Failed to create folder");
+    } finally {
+      setIsCreatingFolder(false);
     }
   };
 
@@ -147,30 +163,41 @@ export default function FolderPage() {
     totalFiles: number,
     totalSize: number,
     previouslyUploadedSize: number
-  ): Promise<{ success: boolean; isDuplicate: boolean; error?: string }> => {
+  ): Promise<{
+    success: boolean;
+    isDuplicate: boolean;
+    isCancelled: boolean;
+    error?: string;
+  }> => {
     return new Promise((resolve) => {
       const formData = new FormData();
       formData.append("file", file);
       if (!isRoot) formData.append("folder_id", folderId);
 
+      const source = axios.CancelToken.source();
+      uploadCancelRef.current = source;
+
       api
         .post("/files/upload", formData, {
           headers: { "Content-Type": "multipart/form-data" },
+          cancelToken: source.token,
           onUploadProgress: (progressEvent) => {
             if (progressEvent.total) {
-              const currentFilePercent = Math.round(
-                (progressEvent.loaded / progressEvent.total) * 100
+              const currentFilePercent = Math.min(
+                100,
+                Math.round((progressEvent.loaded / progressEvent.total) * 100)
               );
 
-              const totalUploaded =
-                previouslyUploadedSize + progressEvent.loaded;
-              const overallPercent = Math.round(
-                (totalUploaded / totalSize) * 100
+              // Cap loaded at total to prevent overflow
+              const cappedLoaded = Math.min(progressEvent.loaded, progressEvent.total);
+              const totalUploaded = Math.min(
+                totalSize,
+                previouslyUploadedSize + cappedLoaded
               );
 
               setUploadProgress({
                 fileName: file.name,
-                loaded: progressEvent.loaded,
+                loaded: cappedLoaded,
                 total: progressEvent.total,
                 percent: currentFilePercent,
                 totalFiles,
@@ -182,15 +209,26 @@ export default function FolderPage() {
           },
         })
         .then(() => {
-          resolve({ success: true, isDuplicate: false });
+          resolve({ success: true, isDuplicate: false, isCancelled: false });
         })
         .catch((error) => {
-          if (error.response?.data?.code === "POSSIBLE_DUPLICATE") {
-            resolve({ success: false, isDuplicate: true });
+          if (axios.isCancel(error)) {
+            resolve({
+              success: false,
+              isDuplicate: false,
+              isCancelled: true,
+            });
+          } else if (error.response?.data?.code === "POSSIBLE_DUPLICATE") {
+            resolve({
+              success: false,
+              isDuplicate: true,
+              isCancelled: false,
+            });
           } else {
             resolve({
               success: false,
               isDuplicate: false,
+              isCancelled: false,
               error: error.response?.data?.message || "Upload failed",
             });
           }
@@ -204,7 +242,6 @@ export default function FolderPage() {
 
     const fileArray = Array.from(files);
 
-    // Validate file count
     if (fileArray.length > 50) {
       toast.error(
         `Maximum 50 files at once. You selected ${fileArray.length} files.`
@@ -213,7 +250,6 @@ export default function FolderPage() {
       return;
     }
 
-    // Validate individual file sizes
     const oversizedFiles = fileArray.filter((f) => f.size > 50 * 1024 * 1024);
     if (oversizedFiles.length > 0) {
       toast.error(
@@ -228,7 +264,9 @@ export default function FolderPage() {
     let successCount = 0;
     let duplicateCount = 0;
     let failedCount = 0;
+    let cancelledCount = 0;
 
+    isCancelledRef.current = false;
     setIsUploading(true);
     setUploadProgress({
       fileName: fileArray[0].name,
@@ -241,8 +279,12 @@ export default function FolderPage() {
       totalSize,
     });
 
-    // Upload files one by one for accurate progress
     for (let i = 0; i < fileArray.length; i++) {
+      if (isCancelledRef.current) {
+        cancelledCount = fileArray.length - i;
+        break;
+      }
+
       const file = fileArray[i];
       const result = await uploadOneFile(
         file,
@@ -251,6 +293,11 @@ export default function FolderPage() {
         totalSize,
         uploadedSize
       );
+
+      if (result.isCancelled) {
+        cancelledCount = fileArray.length - i;
+        break;
+      }
 
       if (result.success) {
         successCount++;
@@ -263,7 +310,6 @@ export default function FolderPage() {
       uploadedSize += file.size;
     }
 
-    // Show results
     if (successCount > 0) {
       toast.success(
         `${successCount} file${successCount !== 1 ? "s" : ""} uploaded successfully`
@@ -279,8 +325,15 @@ export default function FolderPage() {
         `${failedCount} file${failedCount !== 1 ? "s" : ""} failed to upload`
       );
     }
+    if (cancelledCount > 0) {
+      toast.info(
+        `${cancelledCount} file${cancelledCount !== 1 ? "s" : ""} cancelled`
+      );
+    }
 
     setIsUploading(false);
+    isCancelledRef.current = false;
+    uploadCancelRef.current = null;
     setUploadProgress({
       fileName: "",
       loaded: 0,
@@ -293,6 +346,24 @@ export default function FolderPage() {
     });
     e.target.value = "";
     fetchContents();
+  };
+
+  const handleCancelUpload = async () => {
+    const confirmed = await confirm({
+      title: "Cancel Upload?",
+      message:
+        "This will stop uploading remaining files. Files already uploaded will be kept.",
+      variant: "warning",
+      confirmLabel: "Yes, Cancel",
+      cancelLabel: "Continue Upload",
+    });
+
+    if (confirmed) {
+      isCancelledRef.current = true;
+      if (uploadCancelRef.current) {
+        uploadCancelRef.current.cancel("User cancelled");
+      }
+    }
   };
 
   // ── SELECTION ──────────────────────────────────────────────────────────────
@@ -330,40 +401,62 @@ export default function FolderPage() {
 
   const handleBulkDelete = async () => {
     const total = selectedFiles.length + selectedFolders.length;
-    if (total === 0) return;
+    if (total === 0 || isDeleting) return;
 
-    if (!confirm(`Move ${total} item${total !== 1 ? "s" : ""} to trash?`))
-      return;
+    const ok = await confirm({
+      title: "Move to Trash?",
+      message: `${total} item${total !== 1 ? "s" : ""
+        } will be moved to trash. You can restore them within 30 days.`,
+      variant: "danger",
+      confirmLabel: "Move to Trash",
+    });
 
+    if (!ok) return;
+
+    setIsDeleting(true);
     try {
-      const promises = [];
-      if (selectedFiles.length > 0) {
-        promises.push(
-          api.post("/files/bulk-delete", { file_ids: selectedFiles })
-        );
-      }
-      if (selectedFolders.length > 0) {
-        promises.push(
-          api.post("/folders/bulk-delete", { folder_ids: selectedFolders })
-        );
-      }
+      await withLoading(async () => {
+        const promises = [];
+        if (selectedFiles.length > 0) {
+          promises.push(
+            api.post("/files/bulk-delete", { file_ids: selectedFiles })
+          );
+        }
+        if (selectedFolders.length > 0) {
+          promises.push(
+            api.post("/folders/bulk-delete", { folder_ids: selectedFolders })
+          );
+        }
+        await Promise.all(promises);
+      }, `Moving ${total} item(s) to trash...`);
 
-      await Promise.all(promises);
       toast.success(`${total} item${total !== 1 ? "s" : ""} moved to trash`);
       clearSelection();
       fetchContents();
     } catch {
       toast.error("Failed to delete items");
+    } finally {
+      setIsDeleting(false);
     }
   };
 
   // ── SINGLE OPERATIONS ──────────────────────────────────────────────────────
 
   const handleDeleteFolder = async (id: string, name: string) => {
-    if (!confirm(`Move "${name}" to trash?`)) return;
+    const ok = await confirm({
+      title: "Move to Trash?",
+      message: `"${name}" and all its contents will be moved to trash. You can restore it within 30 days.`,
+      variant: "danger",
+      confirmLabel: "Move to Trash",
+    });
+
+    if (!ok) return;
 
     try {
-      await api.delete(`/folders/${id}`);
+      await withLoading(
+        () => api.delete(`/folders/${id}`),
+        `Moving "${name}" to trash...`
+      );
       toast.success("Folder moved to trash");
       fetchContents();
     } catch {
@@ -372,10 +465,20 @@ export default function FolderPage() {
   };
 
   const handleDeleteFile = async (id: string, name: string) => {
-    if (!confirm(`Move "${name}" to trash?`)) return;
+    const ok = await confirm({
+      title: "Move to Trash?",
+      message: `"${name}" will be moved to trash. You can restore it within 30 days.`,
+      variant: "danger",
+      confirmLabel: "Move to Trash",
+    });
+
+    if (!ok) return;
 
     try {
-      await api.delete(`/files/${id}`);
+      await withLoading(
+        () => api.delete(`/files/${id}`),
+        `Moving "${name}" to trash...`
+      );
       toast.success("File moved to trash");
       fetchContents();
     } catch {
@@ -384,8 +487,9 @@ export default function FolderPage() {
   };
 
   const handleRename = async () => {
-    if (!renamingItem || !newName.trim()) return;
+    if (!renamingItem || !newName.trim() || isRenaming) return;
 
+    setIsRenaming(true);
     try {
       if (renamingItem.type === "folder") {
         await api.patch(`/folders/${renamingItem.id}/rename`, {
@@ -401,6 +505,8 @@ export default function FolderPage() {
       fetchContents();
     } catch (error: any) {
       toast.error(error.response?.data?.message || "Rename failed");
+    } finally {
+      setIsRenaming(false);
     }
   };
 
@@ -429,14 +535,24 @@ export default function FolderPage() {
       const res = await api.get(`/files/${id}/download`);
       const { download_url } = res.data.data;
 
+      const response = await fetch(download_url);
+      if (!response.ok) throw new Error("Fetch failed");
+
+      const blob = await response.blob();
+      const blobUrl = URL.createObjectURL(blob);
+
       const link = document.createElement("a");
-      link.href = download_url;
+      link.href = blobUrl;
       link.download = name;
-      link.target = "_blank";
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-    } catch {
+
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+
+      toast.success(`Downloaded ${name}`);
+    } catch (error) {
+      console.error("Download error:", error);
       toast.error("Download failed");
     }
   };
@@ -459,6 +575,7 @@ export default function FolderPage() {
     const printable = [
       "application/pdf",
       "image/jpeg",
+      "image/jpg",
       "image/png",
       "image/gif",
       "image/webp",
@@ -475,12 +592,7 @@ export default function FolderPage() {
       const res = await api.get(`/files/${file.id}/preview`);
       const previewUrl = res.data.data.preview_url;
 
-      await printSingleFile(
-        file.id,
-        file.name,
-        file.mime_type,
-        previewUrl
-      );
+      await printSingleFile(file.id, file.name, file.mime_type, previewUrl);
 
       toast.success("Print window opened");
     } catch (error: any) {
@@ -515,8 +627,9 @@ export default function FolderPage() {
   };
 
   const handleMove = async (targetFolderId: string | null) => {
-    if (!movingItem) return;
+    if (!movingItem || isMoving) return;
 
+    setIsMoving(true);
     try {
       if (movingItem.type === "file") {
         await api.patch(`/files/${movingItem.id}/move`, {
@@ -534,6 +647,8 @@ export default function FolderPage() {
       fetchContents();
     } catch (error: any) {
       toast.error(error.response?.data?.message || "Move failed");
+    } finally {
+      setIsMoving(false);
     }
   };
 
@@ -551,11 +666,13 @@ export default function FolderPage() {
   const isEmpty = folders.length === 0 && files.length === 0;
   const totalSelected = selectedFiles.length + selectedFolders.length;
 
-  // Calculate overall progress
   const overallPercent =
     uploadProgress.totalSize > 0
-      ? Math.round(
-        (uploadProgress.uploadedSize / uploadProgress.totalSize) * 100
+      ? Math.min(
+        100,
+        Math.round(
+          (uploadProgress.uploadedSize / uploadProgress.totalSize) * 100
+        )
       )
       : 0;
 
@@ -603,7 +720,7 @@ export default function FolderPage() {
         {/* Upload Progress Card */}
         {isUploading && (
           <div className="bg-white border-2 border-blue-100 rounded-2xl p-5 mb-4 shadow-sm">
-            <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
               <div className="flex items-center gap-3">
                 <div className="w-10 h-10 bg-blue-100 rounded-xl flex items-center justify-center">
                   <svg
@@ -630,18 +747,25 @@ export default function FolderPage() {
                   </p>
                 </div>
               </div>
-              <div className="text-right">
-                <p className="text-lg font-bold text-blue-600">
-                  {overallPercent}%
-                </p>
-                <p className="text-xs text-gray-400">
-                  {formatFileSize(uploadProgress.uploadedSize)} /{" "}
-                  {formatFileSize(uploadProgress.totalSize)}
-                </p>
+              <div className="flex items-center gap-3">
+                <div className="text-right">
+                  <p className="text-lg font-bold text-blue-600">
+                    {overallPercent}%
+                  </p>
+                  <p className="text-xs text-gray-400">
+                    {formatFileSize(uploadProgress.uploadedSize)} /{" "}
+                    {formatFileSize(uploadProgress.totalSize)}
+                  </p>
+                </div>
+                <button
+                  onClick={handleCancelUpload}
+                  className="px-3 py-1.5 text-xs font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded-lg transition-colors"
+                >
+                  ✕ Cancel
+                </button>
               </div>
             </div>
 
-            {/* Overall progress */}
             <div className="mb-2">
               <div className="flex items-center justify-between mb-1">
                 <span className="text-xs font-medium text-gray-600">
@@ -660,7 +784,6 @@ export default function FolderPage() {
               </div>
             </div>
 
-            {/* Current file progress */}
             <div>
               <div className="flex items-center justify-between mb-1">
                 <span className="text-xs text-gray-500 truncate max-w-xs">
@@ -780,7 +903,6 @@ export default function FolderPage() {
           </span>
         </div>
 
-        {/* Hint */}
         <p className="text-xs text-gray-400 mb-4">
           💡 Max 50 files per upload, 50MB each
         </p>
@@ -1079,7 +1201,7 @@ export default function FolderPage() {
                       <td className="px-4 py-3">
                         {!selectionMode && (
                           <div className="flex items-center gap-1 justify-end opacity-0 group-hover:opacity-100 transition-opacity">
-                            {isPreviewable(file.mime_type) && (
+                            {canPreview(file.mime_type) && (
                               <ActionButton
                                 icon="👁️"
                                 onClick={() => handlePreview(file)}
@@ -1130,7 +1252,7 @@ export default function FolderPage() {
         )}
       </div>
 
-      {/* Modals */}
+      {/* Create Folder Modal */}
       <Modal
         isOpen={showCreateFolder}
         onClose={() => {
@@ -1148,6 +1270,7 @@ export default function FolderPage() {
             onChange={(e) => setNewFolderName(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleCreateFolder()}
             autoFocus
+            disabled={isCreatingFolder}
           />
 
           <div>
@@ -1159,7 +1282,8 @@ export default function FolderPage() {
                 <button
                   key={color}
                   onClick={() => setNewFolderColor(color)}
-                  className={`w-7 h-7 rounded-full transition-transform ${newFolderColor === color
+                  disabled={isCreatingFolder}
+                  className={`w-7 h-7 rounded-full transition-transform disabled:opacity-50 disabled:cursor-not-allowed ${newFolderColor === color
                     ? "scale-125 ring-2 ring-offset-1 ring-gray-400"
                     : "hover:scale-110"
                     }`}
@@ -1174,13 +1298,15 @@ export default function FolderPage() {
               variant="outline"
               onClick={() => setShowCreateFolder(false)}
               className="flex-1"
+              disabled={isCreatingFolder}
             >
               Cancel
             </Button>
             <Button
               onClick={handleCreateFolder}
               className="flex-1"
-              disabled={!newFolderName.trim()}
+              disabled={!newFolderName.trim() || isCreatingFolder}
+              isLoading={isCreatingFolder}
             >
               Create Folder
             </Button>
@@ -1188,6 +1314,7 @@ export default function FolderPage() {
         </div>
       </Modal>
 
+      {/* Rename Modal */}
       <Modal
         isOpen={showRenameModal}
         onClose={() => {
@@ -1204,19 +1331,22 @@ export default function FolderPage() {
             onChange={(e) => setNewName(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleRename()}
             autoFocus
+            disabled={isRenaming}
           />
           <div className="flex gap-2">
             <Button
               variant="outline"
               onClick={() => setShowRenameModal(false)}
               className="flex-1"
+              disabled={isRenaming}
             >
               Cancel
             </Button>
             <Button
               onClick={handleRename}
               className="flex-1"
-              disabled={!newName.trim()}
+              disabled={!newName.trim() || isRenaming}
+              isLoading={isRenaming}
             >
               Rename
             </Button>
@@ -1224,7 +1354,7 @@ export default function FolderPage() {
         </div>
       </Modal>
 
-      {/* File Preview - Full Screen */}
+      {/* File Preview */}
       {previewFile && (
         <FilePreview
           isOpen={showPreviewModal}
@@ -1244,33 +1374,56 @@ export default function FolderPage() {
         />
       )}
 
+      {/* Move Modal */}
       <Modal
         isOpen={showMoveModal}
         onClose={() => {
-          setShowMoveModal(false);
-          setMovingItem(null);
+          if (!isMoving) {
+            setShowMoveModal(false);
+            setMovingItem(null);
+          }
         }}
         title={`Move "${movingItem?.name}"`}
         size="sm"
       >
         <div className="flex flex-col gap-2">
-          <p className="text-sm text-gray-500 mb-2">
-            Select destination folder
-          </p>
+          <p className="text-sm text-gray-500 mb-2">Select destination folder</p>
 
           <button
             onClick={() => handleMove(null)}
-            className="flex items-center gap-3 p-3 rounded-lg hover:bg-blue-50 text-left transition-colors border border-gray-100"
+            disabled={isMoving}
+            className="flex items-center gap-3 p-3 rounded-lg hover:bg-blue-50 text-left transition-colors border border-gray-100 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <span>🏠</span>
             <span className="text-sm font-medium">Root (My Files)</span>
+            {isMoving && (
+              <svg
+                className="animate-spin h-4 w-4 ml-auto text-blue-600"
+                fill="none"
+                viewBox="0 0 24 24"
+              >
+                <circle
+                  className="opacity-25"
+                  cx="12"
+                  cy="12"
+                  r="10"
+                  stroke="currentColor"
+                  strokeWidth="4"
+                />
+                <path
+                  className="opacity-75"
+                  fill="currentColor"
+                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                />
+              </svg>
+            )}
           </button>
 
           {availableFolders.map((folder) => (
             <button
               key={folder.id}
               onClick={() => handleMove(folder.id)}
-              disabled={folder.id === movingItem?.id}
+              disabled={folder.id === movingItem?.id || isMoving}
               className="flex items-center gap-3 p-3 rounded-lg hover:bg-blue-50 text-left transition-colors border border-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <span>📁</span>
@@ -1385,16 +1538,48 @@ function FolderCard({
             onClick={() => setShowMenu(false)}
           />
           <div className="absolute right-2 top-8 z-20 bg-white rounded-lg shadow-lg border border-gray-100 py-1 min-w-36">
-            <MenuItem icon="📂" label="Open" onClick={onOpen} />
-            <MenuItem icon="✏️" label="Rename" onClick={onRename} />
-            <MenuItem icon="📦" label="Move" onClick={onMove} />
+            <MenuItem
+              icon="📂"
+              label="Open"
+              onClick={() => {
+                setShowMenu(false);
+                onOpen();
+              }}
+            />
+            <MenuItem
+              icon="✏️"
+              label="Rename"
+              onClick={() => {
+                setShowMenu(false);
+                onRename();
+              }}
+            />
+            <MenuItem
+              icon="📦"
+              label="Move"
+              onClick={() => {
+                setShowMenu(false);
+                onMove();
+              }}
+            />
             <MenuItem
               icon={folder.is_favorited ? "⭐" : "☆"}
               label={folder.is_favorited ? "Unfavorite" : "Favorite"}
-              onClick={onFavorite}
+              onClick={() => {
+                setShowMenu(false);
+                onFavorite();
+              }}
             />
             <div className="border-t border-gray-100 my-1" />
-            <MenuItem icon="🗑️" label="Delete" onClick={onDelete} danger />
+            <MenuItem
+              icon="🗑️"
+              label="Delete"
+              onClick={() => {
+                setShowMenu(false);
+                onDelete();
+              }}
+              danger
+            />
           </div>
         </>
       )}
@@ -1463,7 +1648,7 @@ function FileCard({
         onClick={
           selectionMode
             ? onToggleSelect
-            : isPreviewable(file.mime_type)
+            : canPreview(file.mime_type)
               ? onPreview
               : onDownload
         }
@@ -1518,26 +1703,75 @@ function FileCard({
             onClick={() => setShowMenu(false)}
           />
           <div className="absolute right-2 top-8 z-20 bg-white rounded-lg shadow-lg border border-gray-100 py-1 min-w-44">
-            {isPreviewable(file.mime_type) && (
-              <MenuItem icon="👁️" label="Preview" onClick={onPreview} />
+            {canPreview(file.mime_type) && (
+              <MenuItem
+                icon="👁️"
+                label="Preview"
+                onClick={() => {
+                  setShowMenu(false);
+                  onPreview();
+                }}
+              />
             )}
-            <MenuItem icon="⬇️" label="Download" onClick={onDownload} />
-            <MenuItem icon="🖨️" label="Print" onClick={onPrint} />
+            <MenuItem
+              icon="⬇️"
+              label="Download"
+              onClick={() => {
+                setShowMenu(false);
+                onDownload();
+              }}
+            />
+            <MenuItem
+              icon="🖨️"
+              label="Print"
+              onClick={() => {
+                setShowMenu(false);
+                onPrint();
+              }}
+            />
             <MenuItem
               icon="➕"
               label="Add to Print Queue"
-              onClick={onAddToPrintQueue}
+              onClick={() => {
+                setShowMenu(false);
+                onAddToPrintQueue();
+              }}
             />
             <div className="border-t border-gray-100 my-1" />
-            <MenuItem icon="✏️" label="Rename" onClick={onRename} />
-            <MenuItem icon="📦" label="Move" onClick={onMove} />
+            <MenuItem
+              icon="✏️"
+              label="Rename"
+              onClick={() => {
+                setShowMenu(false);
+                onRename();
+              }}
+            />
+            <MenuItem
+              icon="📦"
+              label="Move"
+              onClick={() => {
+                setShowMenu(false);
+                onMove();
+              }}
+            />
             <MenuItem
               icon={file.is_favorited ? "⭐" : "☆"}
               label={file.is_favorited ? "Unfavorite" : "Favorite"}
-              onClick={onFavorite}
+              onClick={() => {
+                setShowMenu(false);
+                onFavorite();
+              }}
             />
             <div className="border-t border-gray-100 my-1" />
-            <MenuItem icon="🗑️" label="Delete" onClick={onDelete} danger />
+            <MenuItem
+              icon="🗑️"
+              label="Delete"
+              onClick={() => {
+                setShowMenu(false);
+                onDelete();
+              }}
+              danger
+            />
           </div>
         </>
       )}
